@@ -1,0 +1,6 @@
+fastapi[standard]
+httpx
+numpy
+groq
+pymongo
+pwdlib[argon2]

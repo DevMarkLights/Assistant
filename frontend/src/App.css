@@ -1,0 +1,677 @@
+/* Layout */
+
+.app {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* Shared icon button (menu, new chat, theme) */
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* Only on devices with a real pointer; on touch screens :hover sticks after a tap */
+@media (hover: hover) {
+  .icon-button:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Sidebar */
+
+.sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  padding-top: max(12px, env(safe-area-inset-top));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left));
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  transition: margin-left 0.2s ease, transform 0.2s ease;
+}
+
+/* Desktop: collapsing slides the sidebar out of the flex row */
+.app:not(.sidebar-open) .sidebar {
+  margin-left: -280px;
+}
+
+.sidebar-top {
+  display: flex;
+  gap: 8px;
+}
+
+.new-chat {
+  flex: 1;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  text-align: left;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.new-chat:hover {
+  background: var(--surface-hover);
+}
+
+.sidebar ul {
+  flex: 1;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sidebar li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 4px 0 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.sidebar li:hover {
+  background: var(--surface-hover);
+}
+
+.sidebar li.active {
+  background: var(--surface);
+}
+
+.sidebar li .title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar li .delete,
+.sidebar li .edit {
+  width: 36px;
+  height: 36px;
+  visibility: hidden;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.sidebar li .edit svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar li:hover .delete,
+.sidebar li.active .delete,
+.sidebar li:hover .edit,
+.sidebar li.active .edit {
+  visibility: visible;
+}
+
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  outline: none;
+  background: var(--bg);
+  font-size: 16px; /* 16px+ stops iOS zooming in on focus */
+}
+
+.topbar .rename-input {
+  height: 40px;
+  font-weight: 600;
+}
+
+.topbar .rename svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar li .delete:hover {
+  color: var(--danger);
+  background: none;
+}
+
+.memory-link {
+  min-height: 44px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.memory-link:hover,
+.memory-link.active {
+  background: var(--surface-hover);
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.account .username {
+  flex: 1;
+  padding-left: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.account .logout {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.account .logout:hover {
+  background: var(--surface-hover);
+}
+
+.backdrop {
+  display: none;
+}
+
+/* Main pane */
+
+.chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.topbar .heading {
+  flex: 0 1 auto;
+  padding-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.empty {
+  margin: auto;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Message bubbles */
+
+.bubble {
+  max-width: min(70%, 720px);
+  padding: 10px 14px;
+  border-radius: 16px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: var(--user-bubble);
+  color: var(--on-accent);
+  white-space: pre-wrap;
+  border-bottom-right-radius: 6px;
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-bottom-left-radius: 6px;
+}
+
+/* Markdown inside assistant replies */
+
+.bubble.assistant > :first-child {
+  margin-top: 0;
+}
+
+.bubble.assistant > :last-child {
+  margin-bottom: 0;
+}
+
+.bubble.assistant p,
+.bubble.assistant ul,
+.bubble.assistant ol,
+.bubble.assistant pre {
+  margin: 0.6em 0;
+}
+
+.bubble.assistant ul,
+.bubble.assistant ol {
+  padding-left: 1.4em;
+}
+
+.bubble.assistant a {
+  color: var(--accent);
+}
+
+.bubble.assistant code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--code-bg);
+}
+
+.bubble.assistant pre {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  overflow-x: auto;
+}
+
+.bubble.assistant pre code {
+  padding: 0;
+  background: none;
+}
+
+/* Errors */
+
+.error {
+  color: var(--danger);
+  padding: 0 24px 8px;
+  font-size: 14px;
+}
+
+/* Input bar */
+
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 24px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg);
+}
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+  min-height: 46px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 23px;
+  background: var(--surface);
+  font-size: 16px; /* 16px+ stops iOS zooming in on focus */
+}
+
+.composer input:focus,
+.login-card input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.composer button {
+  min-height: 46px;
+  padding: 0 20px;
+  border: none;
+  border-radius: 23px;
+  background: var(--button);
+  color: var(--on-accent);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.composer button:hover:not(:disabled) {
+  background: var(--button-hover);
+}
+
+.composer button:disabled,
+.new-chat:disabled,
+.memory-link:disabled,
+.account .logout:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Login */
+
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: 16px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+}
+
+.login-card h1 {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.login-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.login-card input {
+  min-height: 46px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+}
+
+.login-card button[type="submit"] {
+  min-height: 46px;
+  border: none;
+  border-radius: 10px;
+  background: var(--button);
+  color: var(--on-accent);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.login-card button[type="submit"]:hover:not(:disabled) {
+  background: var(--button-hover);
+}
+
+.login-card button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.login-card .link {
+  min-height: 40px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.login-error {
+  color: var(--danger);
+  font-size: 14px;
+}
+
+/* Memory panel */
+
+.memory {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 24px;
+  padding-bottom: max(32px, env(safe-area-inset-bottom));
+}
+
+.memory > * {
+  max-width: 720px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.memory header {
+  margin-bottom: 24px;
+}
+
+.memory header p {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.memory section {
+  margin-bottom: 24px;
+}
+
+.memory h3 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.memory ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+}
+
+.memory li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 6px 10px 14px;
+  font-size: 15px;
+}
+
+.memory li + li {
+  border-top: 1px solid var(--border-soft);
+}
+
+.memory li .text {
+  flex: 1;
+}
+
+.memory li .date {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.memory li .delete {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.memory li .delete:hover {
+  color: var(--danger);
+  background: none;
+}
+
+.memory .empty {
+  margin: 24px auto;
+}
+
+.memory .error {
+  padding: 0;
+  margin-bottom: 16px;
+}
+
+/* Touch screens have no hover, so keep delete buttons visible */
+
+@media (hover: none) {
+  .sidebar li .delete {
+    visibility: visible;
+  }
+
+  /* No hover on touch: show the pencil on the open chat's row only, to keep the narrow drawer uncluttered */
+  .sidebar li:not(.active) .edit {
+    display: none;
+  }
+}
+
+/* Phones and small tablets: the sidebar becomes an overlay drawer */
+
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 20;
+    width: 50vw;
+    margin-left: 0 !important;
+    transform: translateX(-100%);
+    box-shadow: none;
+  }
+
+  /* The half-width drawer is narrow, so the username gets its own line */
+  .account {
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+
+  .account .username {
+    flex-basis: 100%;
+    padding: 0 12px 6px;
+  }
+
+  .app.sidebar-open .sidebar {
+    transform: translateX(0);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.4);
+  }
+
+  .backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: var(--overlay);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+
+  .app.sidebar-open .backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .messages {
+    padding: 16px 12px;
+    gap: 12px;
+  }
+
+  .bubble {
+    max-width: 88%;
+    font-size: 15.5px;
+  }
+
+  .composer {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .composer button {
+    padding: 0 16px;
+  }
+
+  .error {
+    padding: 0 12px 8px;
+  }
+
+  .memory {
+    padding: 20px 16px;
+  }
+
+  .memory li {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .memory li .text {
+    flex-basis: calc(100% - 56px);
+  }
+
+  .memory li .date {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .memory li .delete {
+    order: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .backdrop {
+    transition: none;
+  }
+}
+
+.topbar .new-chat-button {
+  margin-left: auto;
+}

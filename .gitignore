@@ -1,0 +1,5 @@
+/backend/.env
+/backend/_*
+
+/backend/dist/
+/frontend/dist/
