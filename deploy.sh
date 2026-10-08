@@ -6,6 +6,6 @@ cp -r dist ../backend
 
 cd ../backend
 source .venv/bin/activate
-pip install -r requirements
+pip install -r requirements.txt
 
 uvicorn main:app --port 8091
