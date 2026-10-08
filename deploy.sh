@@ -8,4 +8,3 @@ source .venv/bin/activate
 pip install -r requirements
 
 uvicorn main:app --port 8091
-fastapi dev main.py
