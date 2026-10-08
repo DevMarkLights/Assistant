@@ -1,4 +1,5 @@
 cd frontend
+npm ci # to use what is in the package.json
 npm run build
 
 cp -r dist ../backend
