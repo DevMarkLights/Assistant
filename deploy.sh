@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+git stash
+git pull
+
 cd frontend
 npm ci # to use what is in the package.json
 npm run build
