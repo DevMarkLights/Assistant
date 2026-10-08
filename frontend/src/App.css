@@ -336,6 +336,78 @@
   background: none;
 }
 
+.bubble.assistant h1,
+.bubble.assistant h2,
+.bubble.assistant h3,
+.bubble.assistant h4 {
+  margin: 0.9em 0 0.4em;
+  font-size: 1.05em;
+  font-weight: 600;
+}
+
+.bubble.assistant h1 {
+  font-size: 1.2em;
+}
+
+.bubble.assistant hr {
+  margin: 1em 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.bubble.assistant blockquote {
+  margin: 0.6em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+
+/* Tables: the wrapper scrolls sideways when a table is wider than the bubble */
+.bubble.assistant .table-wrap {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.bubble.assistant table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+  line-height: 1.45;
+}
+
+/* Tables need all the width they can get */
+.bubble.assistant:has(table) {
+  max-width: min(100%, 960px);
+}
+
+.bubble.assistant th,
+.bubble.assistant td {
+  /* Break between words only, so the table widens (and scrolls) instead of splitting words */
+  overflow-wrap: normal;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+  min-width: 140px;
+  max-width: 420px;
+}
+
+.bubble.assistant th {
+  background: var(--code-bg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.bubble.assistant tr:last-child td {
+  border-bottom: none;
+}
+
+.bubble.assistant th + th,
+.bubble.assistant td + td {
+  border-left: 1px solid var(--border-soft);
+}
+
 /* Errors */
 
 .error {
@@ -490,7 +562,75 @@
 }
 
 .memory header {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
+}
+
+/* Stays pinned at the top while scrolling a long list */
+.memory-search {
+  position: sticky;
+  top: -32px; /* cancels .memory's top padding so it sticks flush */
+  z-index: 1;
+  margin-top: -8px;
+  margin-bottom: 16px;
+  padding: 8px 0;
+  background: var(--bg);
+}
+
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 0 4px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.search-field:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.search-field > svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font-size: 16px; /* 16px+ stops iOS zooming in on focus */
+}
+
+/* Hide the browser's built-in clear button; we render our own */
+.search-field input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+.search-field .clear {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.search-count {
+  padding: 8px 2px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.memory mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
 }
 
 .memory header p {
@@ -629,6 +769,12 @@
     font-size: 15.5px;
   }
 
+  .bubble.assistant th,
+  .bubble.assistant td {
+    min-width: 120px;
+    max-width: 260px;
+  }
+
   .composer {
     padding-left: 12px;
     padding-right: 12px;
@@ -644,6 +790,10 @@
 
   .memory {
     padding: 20px 16px;
+  }
+
+  .memory-search {
+    top: -20px;
   }
 
   .memory li {

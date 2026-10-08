@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import Memory from "./Memory";
 import { useTheme } from "./theme";
 
@@ -27,6 +30,26 @@ const PencilIcon = () => (
     <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
   </svg>
 );
+
+// GFM adds tables, strikethrough and task lists. Models also emit inline HTML such as <br> in
+// table cells: rehype-raw parses it and rehype-sanitize (GitHub's allowlist) strips anything unsafe.
+const remarkPlugins = [remarkGfm];
+const rehypePlugins = [rehypeRaw, rehypeSanitize];
+// react-markdown passes its syntax-tree `node` to custom components; keep it off the DOM element
+function domProps(props) {
+  const rest = { ...props };
+  delete rest.node;
+  return rest;
+}
+const markdownComponents = {
+  // Wide tables scroll sideways instead of squashing the bubble on phones
+  table: (props) => (
+    <div className="table-wrap">
+      <table {...domProps(props)} />
+    </div>
+  ),
+  a: (props) => <a {...domProps(props)} target="_blank" rel="noopener noreferrer" />,
+};
 
 const titleOf = (c) => c.title ?? new Date(c.created_at).toLocaleString();
 
@@ -361,7 +384,13 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
                 <div key={i} className={`bubble ${m.role}`}>
                   {m.role === "assistant" ? (
                     m.text ? (
-                      <ReactMarkdown>{m.text}</ReactMarkdown>
+                      <ReactMarkdown
+                        remarkPlugins={remarkPlugins}
+                        rehypePlugins={rehypePlugins}
+                        components={markdownComponents}
+                      >
+                        {m.text}
+                      </ReactMarkdown>
                     ) : busy && i === messages.length - 1 ? (
                       "..."
                     ) : (
