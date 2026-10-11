@@ -45,14 +45,27 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 1. Load the last `HISTORY_TURNS` exchanges of the conversation.
 2. Embed the message as a query and retrieve `TOP_K` similar past exchanges, skipping the recent ones already in context and filtering by `MIN_SIMILARITY`. Facts work differently. If the user has `ALL_FACTS_LIMIT` (100) facts or fewer, all of them go into the prompt, labelled as the complete list, so "what do you know about me" gets every fact. Above that limit, only the `FACT_TOP_K` most similar facts are included.
 3. `build_messages` adds the facts and memory excerpts to `SYSTEM_PROMPT`, then appends the recent turns as chat messages.
-4. Stream the reply as `text/plain`; the frontend reads it with a `ReadableStream` reader.
-5. Once the stream finishes, embed and save the exchange, then call `memory_writer.schedule(...)`.
+4. Stream the reply as newline-delimited JSON (`application/x-ndjson`), but only when the request sends `Accept: application/x-ndjson`. Without that header the server streams plain text, so a browser tab still running an older frontend keeps working after a deploy. Each line is one event: `{"type":"text","text":...}`, `tool_start` (id, name, label), `tool_end` (id, name, ok, summary, detail), `retract` (`chars`: drop that much trailing text), or `error`; an error means nothing is saved. The frontend splits the stream on newlines (keeping any partial last line for the next read) and folds the events into the message with `applyEvent` in `Chat.jsx`.
+5. Once the stream finishes, embed and save the exchange, including `tool_calls` (name, ok, summary, detail) so the UI's tool chips come back when the chat is reopened. Then call `memory_writer.schedule(...)`.
 
 **Fact memory** (`memory_writer.py`) runs as a fire-and-forget asyncio task after each exchange:
 1. The LLM extracts durable user facts as JSON (`complete_json`, temperature 0, JSON mode).
 2. Each fact is embedded and compared with existing facts. It is added outright if nothing scores at least 0.6, and skipped as a duplicate at 0.95 or above.
 3. Anything in between goes to an LLM ADD/UPDATE/DELETE/NONE decision. Updates push the old text onto the fact's `history` array.
 
-Failures are only `print`ed, so check the server console for `[memory]` log lines.
+Memory changes and failures are logged under `assistant.memory`.
+
+**Logging:** use `log = get_logger("<area>")` from `logs.py`, not `print`. It gives named loggers under `assistant.*` (chat, llm, tools, memory) with timestamped lines on stderr, which systemd sends to journald. Set the level with `LOG_LEVEL` in `.env`; `DEBUG` adds per-message retrieval counts and retract notices. Use `log.exception` inside `except` blocks to include the traceback. The `assistant` logger doesn't propagate, so uvicorn's access log stays separate.
+
+**Tool calling** (Groq path only; with `LOCAL=true` Ollama stays plain chat and `TOOLS_PROMPT` isn't added):
+- **Tools:** `tools.py` holds a `ToolRegistry`. Register a tool with `@registry.tool(description=..., parameters=<JSON schema>, running="UI label while running", summarize=result -> (summary, detail))` on an `async def name(ctx: ToolContext, **args) -> str`. `registry.describe()` turns a result into what the UI chip shows; `Error:` results become a failed chip. `ToolContext` carries `user_id` and `conversation_id`, so tools must scope all data access by `ctx.user_id`.
+- **Errors:** `registry.call` never raises. An unknown tool, bad JSON, wrong arguments or an exception becomes an `Error: ...` string that goes back to the model. Every call is logged as `assistant.tools: name(args) -> result` (as a warning for `Error:` results).
+- **The loop:** `llm._groq_tool_loop` streams each round's text, stitches together tool-call fragments by index, runs the tools, appends `tool` messages and loops. After `MAX_TOOL_ROUNDS` (default 5) rounds it makes one final call with `tool_choice="none"`. A Groq `tool_use_failed` error (a malformed tool call from the model), even one raised mid-stream, retries the round. Text streamed in a round that ends with a tool call, or in a failed attempt, is taken back with a `retract` event. It stays in the model's context but not in the reply or the saved exchange, because models often write the answer, call the tool, then write it again.
+- **Tool messages aren't saved** with the exchange, so ids returned by a tool are gone on the next turn.
+- **Starter tools:**
+  - `get_current_time` gives the time, in a timezone if one is passed.
+  - `remember` reuses `memory_writer.reconcile`, which returns what it did ("Saved", "Updated", "Already known", and so on).
+  - `forget` deletes only when the best vector match is at least `FORGET_CONFIDENT` and leads the runner-up by `FORGET_MARGIN`. Otherwise it returns candidates for the model to ask about. The thresholds were measured with nomic-embed-text; the gap matters more than the absolute score.
+- **Background extraction is skipped** when `remember` or `forget` ran in a turn. Otherwise the extractor could undo the change, for example by saving "the user wants to forget X".
 
 Frontend: `App.jsx` checks `/auth/me` on load and renders either `Login.jsx` or `Chat.jsx`. `Chat.jsx` holds the conversation sidebar and the chat pane, which renders replies with `react-markdown`. Its `api()` wrapper returns the user to the login screen on any 401, and it's passed down to `Memory.jsx`, the fact list (with in-browser word-start search) and delete UI that the sidebar's "Memory" button swaps into the main pane. Styling: `index.css` defines the theme as CSS variables (dark by default; `data-theme="light"` on `<html>` switches to light, toggled with `theme.js` and stored in localStorage). Use those variables, not hard-coded colors. At 768px or narrower, `App.css` turns the sidebar into an overlay drawer controlled by the `sidebar-open` class on `.app`.

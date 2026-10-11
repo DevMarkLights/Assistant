@@ -38,6 +38,7 @@ def _exchange_out(doc: dict) -> dict:
         "conversation_id": doc["conversation_id"],
         "user_text": doc["user_text"],
         "assistant_text": doc["assistant_text"],
+        "tool_calls": doc.get("tool_calls", []),
         "created_at": doc["created_at"].isoformat(),
     }
 
@@ -94,7 +95,8 @@ async def delete_conversation(user_id: str, conversation_id: str) -> bool:
 # ---- exchanges ----
 
 async def add_exchange(user_id: str, conversation_id: str, user_text: str, assistant_text: str,
-                       embedding: list[float], embed_model: str) -> str:
+                       embedding: list[float], embed_model: str,
+                       tool_calls: list[dict] | None = None) -> str:
     doc = {
         "_id": uuid.uuid4().hex,
         "user_id": user_id,
@@ -105,6 +107,8 @@ async def add_exchange(user_id: str, conversation_id: str, user_text: str, assis
         "embed_model": embed_model,
         "created_at": now(),
     }
+    if tool_calls:
+        doc["tool_calls"] = tool_calls  # what the chat UI shows for each call: name, summary, detail
     await exchanges.insert_one(doc)
     return doc["_id"]
 
@@ -190,6 +194,11 @@ async def update_fact(user_id: str, fact_id: str, text: str, embedding: list[flo
         },
     )
     return True
+
+
+async def get_fact(user_id: str, fact_id: str) -> dict | None:
+    doc = await facts.find_one({"_id": fact_id, "user_id": user_id}, {"embedding": 0})
+    return _fact_out(doc) if doc else None
 
 
 async def delete_fact(user_id: str, fact_id: str) -> bool:

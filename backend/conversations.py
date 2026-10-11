@@ -1,21 +1,26 @@
 # FastAPI router for conversation and chat endpoints: create/list/delete conversations,
 # save/retrieve exchanges, and stream LLM replies with semantic memory retrieval injected into context.
+import json
 import os
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import db2
 from embeddings import embed, cosine_similarity
 from models import ExchangeIn
-from config import (ALL_FACTS_LIMIT, EMBED_MODEL, FACT_TOP_K, HISTORY_TURNS, MIN_SIMILARITY,
-                    SYSTEM_PROMPT, TOP_K)
+from config import (ALL_FACTS_LIMIT, EMBED_MODEL, FACT_TOP_K, HISTORY_TURNS, LOCAL, MIN_SIMILARITY,
+                    SYSTEM_PROMPT, TOOLS_PROMPT, TOP_K)
 from embeddings import embed
 from llm import chat_stream
 from models import ChatRequest, TitleUpdate
 import memory_writer
+from logs import get_logger
+import tools
 from auth import current_user
 
 
+
+log = get_logger("chat")
 
 router = APIRouter(prefix="/Assistant/api/conversations", tags=["conversations"],
                    dependencies=[Depends(current_user)])
@@ -45,6 +50,8 @@ async def get_exchanges(conversation_id: str, user: dict = Depends(current_user)
 def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memories: list[dict],
                    user_text: str) -> list[dict]:
     system = SYSTEM_PROMPT
+    if not LOCAL:
+        system += "\n\n" + TOOLS_PROMPT
     if all_facts:
         if facts:
             system += ("\n\nEverything you know about the user (the complete list; if asked what you "
@@ -67,7 +74,8 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
 
 
 @router.post("/{conversation_id}/chat")
-async def chat(conversation_id: str, req: ChatRequest, user: dict = Depends(current_user)):
+async def chat(conversation_id: str, req: ChatRequest, request: Request,
+               user: dict = Depends(current_user)):
     user_id = user["id"]
     if not await db2.get_conversation(user_id, conversation_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -90,23 +98,62 @@ async def chat(conversation_id: str, req: ChatRequest, user: dict = Depends(curr
     all_facts = len(facts) <= ALL_FACTS_LIMIT
     if not all_facts:
         facts = await db2.search_facts(user_id, query_vec, EMBED_MODEL, FACT_TOP_K, MIN_SIMILARITY)
-        for f in facts:
-            print(f"fact {f['score']:.3f}: {f['text']}")
 
+    log.debug("context: %d recent turns, %d facts (all=%s), %d past exchanges",
+              len(recent), len(facts), all_facts, len(memories))
     messages = build_messages(recent, facts, all_facts, memories, req.message)
 
+    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id)
+
+    # Streams newline-delimited JSON events:
+    #   {"type": "text", "text": ...}       a piece of the reply
+    #   {"type": "tool_start", ...}         a tool began (id, name, label)
+    #   {"type": "tool_end", ...}           a tool finished (id, name, ok, summary, detail)
+    #   {"type": "retract", "chars": n}     drop the last n characters of text (a pre-tool draft)
+    #   {"type": "error", "message": ...}   generation failed; nothing is saved
+    # Only clients that ask for it (Accept: application/x-ndjson) get events. Anything else, such
+    # as a browser tab still running the frontend from before a deploy, gets the reply as plain text.
+    ndjson = "application/x-ndjson" in request.headers.get("accept", "")
+
+    def event(data: dict) -> str:
+        if ndjson:
+            return json.dumps(data) + "\n"
+        if data["type"] == "text":
+            return data["text"]
+        if data["type"] == "retract":
+            return "\n\n"  # plain text can't be taken back; at least separate the drafts
+        return "\n\n[Something went wrong generating a reply.]" if data["type"] == "error" else ""
+
     async def generate():
-        parts = []
-        async for piece in chat_stream(messages):
-            parts.append(piece)
-            yield piece
+        reply, tool_calls = "", []
+        try:
+            async for piece in chat_stream(messages, tools=tools.registry, ctx=ctx):
+                if isinstance(piece, str):
+                    reply += piece
+                    yield event({"type": "text", "text": piece})
+                else:
+                    if piece["type"] == "retract":
+                        reply = reply[: max(0, len(reply) - piece["chars"])]
+                    if piece["type"] == "tool_end":
+                        tool_calls.append({k: piece[k] for k in ("name", "ok", "summary", "detail")})
+                    if out := event(piece):
+                        yield out
+        except Exception:
+            log.exception("reply generation failed")
+            yield event({"type": "error", "message": "Something went wrong generating a reply."})
+            return
 
-        reply = "".join(parts).strip()
+        reply = reply.strip()
         vec = await embed(f"User: {req.message}\nAssistant: {reply}", "document")
-        await db2.add_exchange(user_id, conversation_id, req.message, reply, vec, EMBED_MODEL)
-        memory_writer.schedule(user_id, conversation_id, req.message, reply)
+        await db2.add_exchange(user_id, conversation_id, req.message, reply, vec, EMBED_MODEL, tool_calls)
+        # An explicit remember/forget already updated memory; running the background extractor on
+        # the same message could undo it (e.g. saving "The user wants to forget X" after a forget)
+        if tools.MEMORY_TOOLS.intersection(ctx.calls):
+            log.info("skipping background extraction: memory tools ran this turn")
+        else:
+            memory_writer.schedule(user_id, conversation_id, req.message, reply)
 
-    return StreamingResponse(generate(), media_type="text/plain")
+    return StreamingResponse(generate(), media_type="application/x-ndjson" if ndjson else "text/plain")
 
 @router.patch("/{conversation_id}")
 async def rename_conversation(conversation_id: str, body: TitleUpdate,

@@ -15,7 +15,6 @@ async def main(username: str):
     unowned = {"user_id": {"$exists": False}}
     for coll in (db2.conversations, db2.exchanges, db2.facts):
         result = await coll.update_many(unowned, {"$set": {"user_id": user["_id"]}})
-        print(f"{coll.name}: assigned {result.modified_count}")
     await db2.close_db()
 
 

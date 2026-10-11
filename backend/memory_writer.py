@@ -7,6 +7,9 @@ import db2
 from config import EMBED_MODEL
 from embeddings import embed
 from llm import complete_json
+from logs import get_logger
+
+log = get_logger("memory")
 
 SIMILAR_FACTS = 5
 RELATED_THRESHOLD = 0.6
@@ -71,8 +74,8 @@ async def process_exchange(user_id: str, conversation_id: str, user_text: str, a
     try:
         for fact in await extract_facts(user_text, assistant_text):
             await reconcile(user_id, fact, conversation_id)
-    except Exception as e:
-        print(f"[memory] failed: {e!r}")
+    except Exception:
+        log.exception("background memory update failed")
 
 
 async def extract_facts(user_text: str, assistant_text: str) -> list[ExtractedFact]:
@@ -84,25 +87,26 @@ async def extract_facts(user_text: str, assistant_text: str) -> list[ExtractedFa
     try:
         return Extraction.model_validate(data).facts
     except ValidationError as e:
-        print(f"[memory] bad extraction output: {e}")
+        log.warning("bad extraction output: %s", e)
         return []
 
 
-async def reconcile(user_id: str, fact: ExtractedFact, conversation_id: str):
+async def reconcile(user_id: str, fact: ExtractedFact, conversation_id: str) -> str:
+    """Adds, merges, or skips a fact against the user's existing ones. Returns what happened."""
     vec = await embed(fact.text, "document")
     similar = await db2.search_facts(user_id, vec, EMBED_MODEL, SIMILAR_FACTS, RELATED_THRESHOLD)
 
     if not similar:
         await db2.add_fact(user_id, fact.text, fact.category, vec, EMBED_MODEL, conversation_id)
-        print(f"[memory] ADD: {fact.text}")
-        return
+        log.info("ADD: %s", fact.text)
+        return f"Saved: {fact.text}"
 
     if similar[0]["score"] >= DUPLICATE_THRESHOLD:
-        print(f"[memory] NONE (duplicate): {fact.text}")
-        return
+        log.info("NONE (duplicate): %s", fact.text)
+        return f"Already known: {similar[0]['text']}"
 
     decision = await decide(fact, similar)
-    await apply(user_id, decision, fact, vec, similar, conversation_id)
+    return await apply(user_id, decision, fact, vec, similar, conversation_id)
 
 
 async def decide(fact: ExtractedFact, similar: list[dict]) -> Decision:
@@ -115,17 +119,17 @@ async def decide(fact: ExtractedFact, similar: list[dict]) -> Decision:
     try:
         return Decision.model_validate(data)
     except ValidationError as e:
-        print(f"[memory] bad decision output: {e}")
+        log.warning("bad decision output: %s", e)
         return Decision(action="NONE")
 
 
 async def apply(user_id: str, decision: Decision, fact: ExtractedFact, vec: list[float],
-                similar: list[dict], conversation_id: str):
+                similar: list[dict], conversation_id: str) -> str:
     target = None
     if decision.action in ("UPDATE", "DELETE"):
         if decision.target is None or not 1 <= decision.target <= len(similar):
-            print(f"[memory] invalid target {decision.target}, skipping: {fact.text}")
-            return
+            log.warning("invalid target %s, skipping: %s", decision.target, fact.text)
+            return f"Not saved: couldn't work out how it relates to existing facts: {fact.text}"
         target = similar[decision.target - 1]
 
     text = (decision.text or fact.text).strip()
@@ -134,12 +138,15 @@ async def apply(user_id: str, decision: Decision, fact: ExtractedFact, vec: list
 
     if decision.action == "ADD":
         await db2.add_fact(user_id, text, fact.category, vec, EMBED_MODEL, conversation_id)
-        print(f"[memory] ADD: {text}")
-    elif decision.action == "UPDATE":
+        log.info("ADD: %s", text)
+        return f"Saved: {text}"
+    if decision.action == "UPDATE":
         await db2.update_fact(user_id, target["id"], text, vec)
-        print(f"[memory] UPDATE: {target['text']} -> {text}")
-    elif decision.action == "DELETE":
+        log.info("UPDATE: %s -> %s", target["text"], text)
+        return f"Updated: {target['text']} -> {text}"
+    if decision.action == "DELETE":
         await db2.delete_fact(user_id, target["id"])
-        print(f"[memory] DELETE: {target['text']}")
-    else:
-        print(f"[memory] NONE: {fact.text}")
+        log.info("DELETE: %s", target["text"])
+        return f"Removed outdated fact: {target['text']}"
+    log.info("NONE: %s", fact.text)
+    return f"Already known: {similar[0]['text']}"

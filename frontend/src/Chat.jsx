@@ -51,6 +51,69 @@ const markdownComponents = {
   a: (props) => <a {...domProps(props)} target="_blank" rel="noopener noreferrer" />,
 };
 
+const ClockIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);
+const MemoryIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 3h12v18l-6-4-6 4z" />
+  </svg>
+);
+const ToolIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z" />
+  </svg>
+);
+const TOOL_ICONS = { get_current_time: ClockIcon, remember: MemoryIcon, forget: MemoryIcon };
+
+// One chip per tool call: a spinner while it runs, then a summary that expands to show details
+function ToolCalls({ calls }) {
+  return (
+    <div className="tool-calls">
+      {calls.map((c) => {
+        const Icon = TOOL_ICONS[c.name] ?? ToolIcon;
+        const state = c.status === "running" ? "running" : c.ok === false ? "failed" : "done";
+        const head = (
+          <>
+            {state === "running" ? <span className="spinner" aria-hidden="true" /> : <Icon />}
+            <span>{state === "running" ? `${c.label}…` : c.summary}</span>
+          </>
+        );
+        return c.detail && state !== "running" ? (
+          <details key={c.id} className={`tool-call ${state}`}>
+            <summary>{head}</summary>
+            <p>{c.detail}</p>
+          </details>
+        ) : (
+          <div key={c.id} className={`tool-call ${state}`}>
+            {head}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Applies one streamed event to the assistant message being built
+function applyEvent(msg, ev) {
+  if (ev.type === "text") return { ...msg, text: msg.text + ev.text };
+  // Text the model wrote before calling a tool; the real answer follows the tool result
+  if (ev.type === "retract") return { ...msg, text: msg.text.slice(0, Math.max(0, msg.text.length - ev.chars)) };
+  if (ev.type === "tool_start") {
+    return { ...msg, tools: [...msg.tools, { id: ev.id, name: ev.name, label: ev.label, status: "running" }] };
+  }
+  if (ev.type === "tool_end") {
+    return {
+      ...msg,
+      tools: msg.tools.map((t) => (t.id === ev.id ? { ...t, ...ev, status: "done" } : t)),
+    };
+  }
+  return msg;
+}
+
 const titleOf = (c) => c.title ?? new Date(c.created_at).toLocaleString();
 
 // Inline title editor: Enter or clicking away saves, Escape cancels
@@ -156,7 +219,11 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     setMessages(
       exchanges.flatMap((ex) => [
         { role: "user", text: ex.user_text },
-        { role: "assistant", text: ex.assistant_text },
+        {
+          role: "assistant",
+          text: ex.assistant_text,
+          tools: (ex.tool_calls ?? []).map((t, i) => ({ ...t, id: i, status: "done" })),
+        },
       ])
     );
   }
@@ -231,24 +298,36 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     setError(null);
     try {
       const id = activeId ?? (await newConversation());
-      setMessages((prev) => [...prev, { role: "user", text }, { role: "assistant", text: "" }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", text },
+        { role: "assistant", text: "", tools: [] },
+      ]);
 
       const res = await api(`/Assistant/api/conversations/${id}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // Asks for the event stream; without this header the server sends plain text
+        headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
         body: JSON.stringify({ message: text }),
       });
       if (!res.ok) throw new Error(`Chat failed: ${res.status}`);
 
+      // The reply streams as newline-delimited JSON events; a read can end mid-line, so keep the tail
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        const events = lines.filter(Boolean).map((line) => JSON.parse(line));
+        const failure = events.find((ev) => ev.type === "error");
+        if (failure) setError(failure.message);
         setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
+          const last = events.reduce(applyEvent, prev[prev.length - 1]);
+          return [...prev.slice(0, -1), last];
         });
       }
     } catch (err) {
@@ -383,19 +462,20 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
               {messages.map((m, i) => (
                 <div key={i} className={`bubble ${m.role}`}>
                   {m.role === "assistant" ? (
-                    m.text ? (
-                      <ReactMarkdown
-                        remarkPlugins={remarkPlugins}
-                        rehypePlugins={rehypePlugins}
-                        components={markdownComponents}
-                      >
-                        {m.text}
-                      </ReactMarkdown>
-                    ) : busy && i === messages.length - 1 ? (
-                      "..."
-                    ) : (
-                      ""
-                    )
+                    <>
+                      {m.tools?.length > 0 && <ToolCalls calls={m.tools} />}
+                      {m.text ? (
+                        <ReactMarkdown
+                          remarkPlugins={remarkPlugins}
+                          rehypePlugins={rehypePlugins}
+                          components={markdownComponents}
+                        >
+                          {m.text}
+                        </ReactMarkdown>
+                      ) : busy && i === messages.length - 1 && !m.tools?.some((t) => t.status === "running") ? (
+                        "..."
+                      ) : null}
+                    </>
                   ) : (
                     m.text
                   )}

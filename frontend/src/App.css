@@ -408,6 +408,99 @@
   border-left: 1px solid var(--border-soft);
 }
 
+/* Tool calls shown above an assistant reply */
+
+.tool-calls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tool-calls:last-child {
+  margin-bottom: 0;
+}
+
+.tool-call {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.tool-call > summary,
+div.tool-call {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+}
+
+.tool-call > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.tool-call > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-call > summary::after {
+  content: "›";
+  margin-left: 2px;
+  transition: transform 0.15s ease;
+}
+
+.tool-call[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.tool-call svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.tool-call.done svg {
+  color: var(--accent);
+}
+
+.tool-call.failed {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.tool-call > p {
+  padding: 0 10px 8px 31px;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+}
+
 /* Errors */
 
 .error {

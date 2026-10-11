@@ -1,10 +1,14 @@
 # Streaming LLM client that routes to Ollama (local) or Groq (cloud) based on the LOCAL config flag.
+# The Groq path can also run a tool-calling loop; Ollama is plain chat.
 import json
-from groq import AsyncGroq
+from groq import APIError, AsyncGroq
 
 import httpx
 
-from config import OLLAMA_URL, CHAT_MODEL, GROQ_API_KEY, GROQ_MODEL, GROQ_URL, LOCAL
+from config import OLLAMA_URL, CHAT_MODEL, GROQ_API_KEY, GROQ_MODEL, GROQ_URL, LOCAL, MAX_TOOL_ROUNDS
+from logs import get_logger
+
+log = get_logger("llm")
 
 TIMEOUT = httpx.Timeout(120.0, connect=5.0)
 
@@ -15,9 +19,14 @@ if not LOCAL:
     groq_client = AsyncGroq(api_key=GROQ_API_KEY, timeout=TIMEOUT, max_retries=2)
 
 
-async def chat_stream(messages: list[dict]):
+async def chat_stream(messages: list[dict], tools=None, ctx=None):
+    """Yields reply text (str). With a tool registry on the Groq path, runs the tool loop and also
+    yields dict events: {"type": "tool_start", ...}, {"type": "tool_end", ...}, and
+    {"type": "retract", "chars": n}, meaning the last n characters of text should be dropped."""
     if LOCAL:
         stream = _ollama_stream(messages)
+    elif tools is not None:
+        stream = _groq_tool_loop(messages, tools, ctx)
     else:
         stream = _groq_stream(messages)
 
@@ -61,6 +70,73 @@ async def _groq_stream(messages: list[dict]):
         piece = chunk.choices[0].delta.content
         if piece:
             yield piece
+
+
+async def _groq_tool_loop(messages: list[dict], registry, ctx):
+    messages = list(messages)
+    rounds = 0
+    while True:
+        # Out of rounds: one last call with tools disabled so the model has to answer
+        final = rounds >= MAX_TOOL_ROUNDS
+        text, calls = [], {}
+        try:
+            stream = await groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                tools=registry.schemas(),
+                tool_choice="none" if final else "auto",
+                stream=True,
+            )
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    text.append(delta.content)
+                    yield delta.content
+                # Tool calls arrive in fragments keyed by index; stitch them together
+                for tc in delta.tool_calls or []:
+                    call = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                    call["id"] = tc.id or call["id"]
+                    if tc.function:
+                        call["name"] += tc.function.name or ""
+                        call["arguments"] += tc.function.arguments or ""
+        except APIError as e:
+            # Groq rejects tool calls the model formatted badly, sometimes mid-stream; retry the
+            # round instead of failing, and take back any text the failed attempt streamed
+            if "tool_use_failed" in str(e) and not final:
+                log.warning("model produced a malformed tool call, retrying: %s", e)
+                if text:
+                    yield {"type": "retract", "chars": len("".join(text))}
+                rounds += 1
+                continue
+            raise
+
+        if not calls:
+            return
+
+        # Text written before a tool call is usually a premature answer that gets repeated once the
+        # result is in. Keep it in the model's context below but take it back from the user.
+        if text:
+            log.debug("retracting %d chars written before a tool call", len("".join(text)))
+            yield {"type": "retract", "chars": len("".join(text))}
+        rounds += 1
+        ordered = [calls[i] for i in sorted(calls)]
+        messages.append({
+            "role": "assistant",
+            "content": "".join(text) or None,
+            "tool_calls": [
+                {"id": c["id"], "type": "function",
+                 "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
+                for c in ordered
+            ],
+        })
+        for c in ordered:
+            yield {"type": "tool_start", "id": c["id"], "name": c["name"],
+                   "label": registry.running_label(c["name"])}
+            result = await registry.call(c["name"], c["arguments"], ctx)
+            messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+            yield {"type": "tool_end", "id": c["id"], "name": c["name"], **registry.describe(c["name"], result)}
 
 
 async def complete_json(messages: list[dict]) -> dict:
