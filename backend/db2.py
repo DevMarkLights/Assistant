@@ -52,12 +52,23 @@ async def init_db():
     await users.create_index("username", unique=True)
     # TTL index: MongoDB removes sessions once expires_at has passed
     await sessions.create_index("expires_at", expireAfterSeconds=0)
+    # Keyword search for hybrid retrieval. Plain text indexes, unlike Atlas Search indexes,
+    # don't count against the free tier's limit of 3 search indexes.
+    await exchanges.create_index([("user_text", "text"), ("assistant_text", "text")], name="exchange_text")
+    await facts.create_index([("text", "text")], name="fact_text")
 
 async def close_db():
     await client.close()
 
 
 # ---- conversations ----
+
+async def set_title_if_empty(user_id: str, conversation_id: str, title: str) -> bool:
+    """Sets an auto-generated title unless the conversation already has one (e.g. renamed meanwhile)."""
+    result = await conversations.update_one(
+        {"_id": conversation_id, "user_id": user_id, "title": None}, {"$set": {"title": title}})
+    return result.modified_count > 0
+
 
 async def create_conversation(user_id: str, title: str | None = None) -> dict:
     doc = {"_id": uuid.uuid4().hex, "user_id": user_id, "title": title, "created_at": now()}
@@ -274,3 +285,32 @@ async def get_session_user(token_hash: str) -> dict | None:
 
 async def delete_session(token_hash: str):
     await sessions.delete_one({"_id": token_hash})
+
+
+# ---- keyword search (hybrid retrieval) ----
+
+async def _keyword_search(coll, user_id: str, query: str, embed_model: str, limit: int) -> list[dict]:
+    """Text-index matches with their raw text score and stored embedding, best first."""
+    cursor = coll.find(
+        {"$text": {"$search": query}, "user_id": user_id, "embed_model": embed_model},
+        {"history": 0, "keyword_score": {"$meta": "textScore"}},
+    ).sort([("keyword_score", {"$meta": "textScore"})]).limit(limit)
+    return [doc async for doc in cursor]
+
+
+async def keyword_search_exchanges(user_id: str, query: str, embed_model: str, limit: int) -> list[dict]:
+    out = []
+    for doc in await _keyword_search(exchanges, user_id, query, embed_model, limit):
+        item = _exchange_out(doc)
+        item["keyword_score"], item["embedding"] = doc["keyword_score"], doc["embedding"]
+        out.append(item)
+    return out
+
+
+async def keyword_search_facts(user_id: str, query: str, embed_model: str, limit: int) -> list[dict]:
+    out = []
+    for doc in await _keyword_search(facts, user_id, query, embed_model, limit):
+        item = _fact_out(doc)
+        item["keyword_score"], item["embedding"] = doc["keyword_score"], doc["embedding"]
+        out.append(item)
+    return out

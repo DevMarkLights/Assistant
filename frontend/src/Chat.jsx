@@ -350,6 +350,10 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
         const events = lines.filter(Boolean).map((line) => JSON.parse(line));
         const failure = events.find((ev) => ev.type === "error");
         if (failure) setError(failure.message);
+        const titled = events.find((ev) => ev.type === "title");
+        if (titled) {
+          setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: titled.title } : c)));
+        }
         setMessages((prev) => {
           const last = events.reduce(applyEvent, prev[prev.length - 1]);
           return [...prev.slice(0, -1), last];

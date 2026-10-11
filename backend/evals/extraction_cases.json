@@ -1,0 +1,141 @@
+[
+  {
+    "id": "new-pet",
+    "user": "I just adopted a beagle named Biscuit! He's so energetic.",
+    "assistant": "Congratulations! Beagles are wonderful companions.",
+    "expected": [{"fact": "The user has a beagle named Biscuit.", "keywords": ["Biscuit", "beagle|dog"]}]
+  },
+  {
+    "id": "job-and-home",
+    "user": "I'm a nurse at Emory and I live in Decatur. Any tips for sleeping after night shifts?",
+    "assistant": "Blackout curtains and a consistent wind-down routine help a lot.",
+    "expected": [
+      {"fact": "The user is a nurse at Emory.", "keywords": ["nurse"]},
+      {"fact": "The user lives in Decatur.", "keywords": ["Decatur"]},
+      {"fact": "The user works night shifts.", "keywords": ["night"], "optional": true}
+    ]
+  },
+  {
+    "id": "question-only",
+    "user": "What's the best way to learn Rust?",
+    "assistant": "Start with the official Rust Book, then build a small CLI tool.",
+    "expected": []
+  },
+  {
+    "id": "small-talk",
+    "user": "lol thanks, that was helpful",
+    "assistant": "Glad I could help!",
+    "expected": []
+  },
+  {
+    "id": "sensitive-pin",
+    "user": "My bank PIN is 4492, can you remember it for me?",
+    "assistant": "I'd recommend storing that in a password manager instead.",
+    "expected": []
+  },
+  {
+    "id": "sensitive-health",
+    "user": "I was diagnosed with type 2 diabetes last year. Any snack ideas?",
+    "assistant": "Nuts, Greek yogurt, and veggies with hummus are good options.",
+    "expected": []
+  },
+  {
+    "id": "assistant-stated",
+    "user": "Who wrote Dune?",
+    "assistant": "Frank Herbert. You'd probably love it since you're into sci-fi.",
+    "expected": []
+  },
+  {
+    "id": "hypothetical",
+    "user": "If I ever got a cat I'd name it Mochi.",
+    "assistant": "Mochi is an adorable name for a cat!",
+    "expected": []
+  },
+  {
+    "id": "diet-and-food",
+    "user": "I'm vegetarian and I love Thai food. What should I cook tonight?",
+    "assistant": "A green curry with tofu and vegetables would be great.",
+    "expected": [
+      {"fact": "The user is vegetarian.", "keywords": ["vegetarian"]},
+      {"fact": "The user loves Thai food.", "keywords": ["Thai"]}
+    ]
+  },
+  {
+    "id": "project",
+    "user": "I'm building a home automation dashboard with Home Assistant and React. How should I structure the components?",
+    "assistant": "Group components by room and keep device state in a single store.",
+    "expected": [{"fact": "The user is building a home automation dashboard with Home Assistant and React.", "keywords": ["Home Assistant|home automation"]}]
+  },
+  {
+    "id": "goal",
+    "user": "I'm training for my first marathon in March, how many miles should I run per week?",
+    "assistant": "Most beginner plans build from about 20 to 40 miles per week.",
+    "expected": [{"fact": "The user is training for their first marathon in March.", "keywords": ["marathon"]}]
+  },
+  {
+    "id": "one-off-task",
+    "user": "Can you convert 5 miles to kilometers?",
+    "assistant": "5 miles is about 8.05 kilometers.",
+    "expected": []
+  },
+  {
+    "id": "family-trip",
+    "user": "My wife Sarah and I are going to Japan in April. What should we see in Kyoto?",
+    "assistant": "Fushimi Inari, Kinkaku-ji, and the Arashiyama bamboo grove.",
+    "expected": [
+      {"fact": "The user's wife is named Sarah.", "keywords": ["Sarah"]},
+      {"fact": "The user is traveling to Japan in April.", "keywords": ["Japan"], "optional": true}
+    ]
+  },
+  {
+    "id": "preference",
+    "user": "Please keep your answers short, I hate long explanations.",
+    "assistant": "Got it, I'll keep things brief.",
+    "expected": [{"fact": "The user prefers short answers.", "keywords": ["short|concise|brief"]}]
+  },
+  {
+    "id": "job-change",
+    "user": "I don't work at Google anymore, I joined Stripe last month.",
+    "assistant": "Congrats on the new role at Stripe!",
+    "expected": [
+      {"fact": "The user works at Stripe.", "keywords": ["Stripe"]},
+      {"fact": "The user no longer works at Google.", "keywords": ["Google"], "optional": true}
+    ]
+  },
+  {
+    "id": "skills",
+    "user": "I've been coding in Python for 10 years but I'm totally new to Go. Is Go hard to pick up?",
+    "assistant": "With your Python background, you'll find Go quite approachable.",
+    "expected": [
+      {"fact": "The user has been coding in Python for 10 years.", "keywords": ["Python"]},
+      {"fact": "The user is new to Go.", "keywords": ["Go"]}
+    ]
+  },
+  {
+    "id": "task-detail",
+    "user": "Here's my error: TypeError: undefined is not a function in app.js line 42",
+    "assistant": "That usually means you're calling something that isn't defined yet. Check the import.",
+    "expected": []
+  },
+  {
+    "id": "move-with-kids",
+    "user": "We just moved to Austin with our two kids, any good parks?",
+    "assistant": "Zilker Park and Mueller Lake Park are family favorites.",
+    "expected": [
+      {"fact": "The user lives in Austin.", "keywords": ["Austin"]},
+      {"fact": "The user has two kids.", "keywords": ["kids|children"]}
+    ]
+  },
+  {
+    "id": "sensitive-wifi",
+    "user": "My wifi password is sunflower123, write it down somewhere.",
+    "assistant": "I'd suggest a password manager for that.",
+    "expected": []
+  },
+  {
+    "id": "hobby-in-question",
+    "user": "Since I play guitar, what's a good pedal for blues?",
+    "assistant": "An Ibanez Tube Screamer is a classic choice for blues.",
+    "expected": [{"fact": "The user plays guitar.", "keywords": ["guitar"]}]
+  }
+]

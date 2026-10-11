@@ -25,7 +25,16 @@ cd backend && fastapi dev main.py
 cd frontend && npm run lint
 ```
 
-There are no tests. `vite.config.js` has no dev proxy, so `npm run dev` alone cannot reach the API; rebuild and copy `dist` into `backend/` to see frontend changes.
+There are no unit tests. There is an extraction eval, run from `backend/`:
+
+```bash
+../.venv/bin/python evals/run_extraction.py                    # current EXTRACT_PROMPT on MEMORY_MODEL (~8K tokens)
+../.venv/bin/python evals/run_extraction.py --prompt p.txt --label "stricter"   # try a prompt from a file
+../.venv/bin/python evals/run_extraction.py --model openai/gpt-oss-120b         # try another model
+../.venv/bin/python evals/run_extraction.py --fake             # check the scorer itself; no API calls
+```
+
+It scores `memory_writer.extract_facts` on `evals/extraction_cases.json` (20 exchanges, 8 of which should produce no facts) and prints per-case extras and misses, plus precision, recall and F1. Each run is appended to `evals/results.csv`. A match requires every keyword group to appear as a whole word (`a|b` = either); `optional` facts are never counted as misses or as extras. It uses the user's Groq budget, so ask before running it. `vite.config.js` has no dev proxy, so `npm run dev` alone cannot reach the API; rebuild and copy `dist` into `backend/` to see frontend changes.
 
 ## Architecture
 
@@ -41,11 +50,22 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 
 **Persistence is MongoDB (`db2.py`).** `db.py` is an older SQLite implementation that nothing imports; leave it alone unless asked. MongoDB stores three collections: `conversations`, `exchanges` (one user+assistant turn, with its embedding), and `facts`. Similarity search uses Atlas Vector Search through the indexes `exchange_vector_index` and `fact_vector_index`. These indexes must already exist in Atlas because the code does not create them, and both must declare `embed_model` and `user_id` as `filter` fields. Atlas returns scores in [0,1], and the code converts them back to cosine with `2*score - 1`. Every search filters on `embed_model`, so changing the embedding model hides old vectors from search.
 
+**Retrieval** (`retrieval.py`): chat context and `/memory/search` use hybrid search.
+- **Merge:** vector results (`$vectorSearch`) and keyword results (MongoDB `$text` on the `exchange_text` and `fact_text` indexes, created in `init_db`) are merged by id.
+- **Score:** `similarity + KEYWORD_WEIGHT * keyword + RECENCY_WEIGHT * recency`. `keyword` is the text score relative to the best keyword hit; `recency` halves every `RECENCY_HALF_LIFE_DAYS`. Keyword-only hits get their similarity computed from the stored embedding.
+- **Filter:** a result is kept if its similarity is at least `MIN_SIMILARITY` or it matched a keyword.
+- **Why text indexes:** plain text indexes are used because Atlas Search indexes are capped at 3 on the free tier, and 2 are already taken by the vector indexes.
+- **Where it doesn't apply:** dedupe in `reconcile` and the `forget` tool stay vector-only, since their thresholds were calibrated on raw similarity.
+- **Index lag:** Atlas's vector index lags writes by a few seconds while `$text` doesn't. Tests that insert and then search immediately must wait for the vector index to catch up.
+- **Limit:** keyword search can't link an acronym ("OMSCS") to a fact that only spells it out.
+
+**Titles** (`titles.py`): when a chat has no title, `chat` starts a `MEMORY_MODEL` title task from the chat's first message alongside the reply. When the reply is done it saves the title with `set_title_if_empty`, which won't overwrite a rename made in the meantime, and emits a `title` event that `Chat.jsx` applies to the sidebar.
+
 **Chat request flow** (`conversations.py` `POST /{id}/chat`):
 1. Load the last `HISTORY_TURNS` exchanges of the conversation.
 2. Embed the message as a query and retrieve `TOP_K` similar past exchanges, skipping the recent ones already in context and filtering by `MIN_SIMILARITY`. Facts work differently. If the user has `ALL_FACTS_LIMIT` (100) facts or fewer, all of them go into the prompt, labelled as the complete list, so "what do you know about me" gets every fact. Above that limit, only the `FACT_TOP_K` most similar facts are included.
 3. `build_messages` adds the facts and memory excerpts to `SYSTEM_PROMPT`, then appends the recent turns as chat messages.
-4. Stream the reply as newline-delimited JSON (`application/x-ndjson`), but only when the request sends `Accept: application/x-ndjson`. Without that header the server streams plain text, so a browser tab still running an older frontend keeps working after a deploy. Each line is one event: `{"type":"text","text":...}`, `tool_start` (id, name, label), `tool_end` (id, name, ok, summary, detail), `retract` (`chars`: drop that much trailing text), or `error`; an error means nothing is saved. The frontend splits the stream on newlines (keeping any partial last line for the next read) and folds the events into the message with `applyEvent` in `Chat.jsx`.
+4. Stream the reply as newline-delimited JSON (`application/x-ndjson`), but only when the request sends `Accept: application/x-ndjson`. Without that header the server streams plain text, so a browser tab still running an older frontend keeps working after a deploy. Each line is one event: `{"type":"text","text":...}`, `tool_start` (id, name, label), `tool_end` (id, name, ok, summary, detail), `retract` (`chars`: drop that much trailing text), `title`, or `error`; an error means nothing is saved. The frontend splits the stream on newlines (keeping any partial last line for the next read) and folds the events into the message with `applyEvent` in `Chat.jsx`.
 5. Once the stream finishes, embed and save the exchange, including `tool_calls` (name, ok, summary, detail) so the UI's tool chips come back when the chat is reopened. Then call `memory_writer.schedule(...)`.
 
 **Fact memory** (`memory_writer.py`) runs as a fire-and-forget asyncio task after each exchange:

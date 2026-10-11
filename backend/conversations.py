@@ -1,5 +1,6 @@
 # FastAPI router for conversation and chat endpoints: create/list/delete conversations,
 # save/retrieve exchanges, and stream LLM replies with semantic memory retrieval injected into context.
+import asyncio
 import json
 import os
 import re
@@ -18,6 +19,8 @@ from embeddings import embed
 from llm import chat_stream
 from models import ChatRequest, TitleUpdate
 import memory_writer
+import retrieval
+import titles
 from logs import get_logger
 import tools
 from auth import current_user
@@ -83,19 +86,22 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
 async def chat(conversation_id: str, req: ChatRequest, request: Request,
                user: dict = Depends(current_user)):
     user_id = user["id"]
-    if not await db2.get_conversation(user_id, conversation_id):
+    conversation = await db2.get_conversation(user_id, conversation_id)
+    if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     history = await db2.list_exchanges(user_id, conversation_id)
     recent = history[-HISTORY_TURNS:]
 
+    # Untitled chats get a title from their first message, generated while the reply streams
+    title_task = None
+    if conversation["title"] is None:
+        first_message = history[0]["user_text"] if history else req.message
+        title_task = asyncio.create_task(titles.generate(first_message))
+
     query_vec = await embed(req.message, "query")
-    memories = await db2.search_exchanges(
-        user_id,
-        query_vec,
-        EMBED_MODEL,
-        top_k=TOP_K,
-        min_similarity=MIN_SIMILARITY,
+    memories = await retrieval.recall_exchanges(
+        user_id, req.message, query_vec, top_k=TOP_K, min_similarity=MIN_SIMILARITY,
         exclude_ids=[ex["id"] for ex in recent],
     )
 
@@ -103,7 +109,7 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
     facts = await db2.list_facts(user_id, limit=ALL_FACTS_LIMIT + 1)
     all_facts = len(facts) <= ALL_FACTS_LIMIT
     if not all_facts:
-        facts = await db2.search_facts(user_id, query_vec, EMBED_MODEL, FACT_TOP_K, MIN_SIMILARITY)
+        facts = await retrieval.recall_facts(user_id, req.message, query_vec, FACT_TOP_K, MIN_SIMILARITY)
 
     log.debug("context: %d recent turns, %d facts (all=%s), %d past exchanges",
               len(recent), len(facts), all_facts, len(memories))
@@ -116,6 +122,7 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
     #   {"type": "tool_start", ...}         a tool began (id, name, label)
     #   {"type": "tool_end", ...}           a tool finished (id, name, ok, summary, detail)
     #   {"type": "retract", "chars": n}     drop the last n characters of text (a pre-tool draft)
+    #   {"type": "title", "title": ...}     the conversation was given an auto-generated title
     #   {"type": "error", "message": ...}   generation failed; nothing is saved
     # Only clients that ask for it (Accept: application/x-ndjson) get events. Anything else, such
     # as a browser tab still running the frontend from before a deploy, gets the reply as plain text.
@@ -155,11 +162,22 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
             else:
                 when = " Try again later."
             yield event({"type": "error", "message": "The AI service's usage limit was reached." + when})
+            if title_task:
+                title_task.cancel()
             return
         except Exception:
             log.exception("reply generation failed")
             yield event({"type": "error", "message": "Something went wrong generating a reply."})
+            if title_task:
+                title_task.cancel()
             return
+
+        if title_task and (title := await title_task):
+            # Skipped if the user renamed the chat while the reply was streaming
+            if await db2.set_title_if_empty(user_id, conversation_id, title):
+                log.info("titled conversation %s: %s", conversation_id, title)
+                if out := event({"type": "title", "title": title}):
+                    yield out
 
         reply = reply.strip()
         vec = await embed(f"User: {req.message}\nAssistant: {reply}", "document")

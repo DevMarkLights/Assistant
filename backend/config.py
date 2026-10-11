@@ -18,6 +18,11 @@ MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "5"))
 MIN_SIMILARITY = float(os.getenv("MIN_SIMILARITY", "0.5"))
 TOP_K = int(os.getenv("TOP_K", "4"))
 FACT_TOP_K = int(os.getenv("FACT_TOP_K", "8"))
+# Hybrid retrieval scoring: similarity + KEYWORD_WEIGHT * keyword match (0-1, relative to the best
+# match) + RECENCY_WEIGHT * recency (1 for today, halving every RECENCY_HALF_LIFE_DAYS)
+KEYWORD_WEIGHT = float(os.getenv("KEYWORD_WEIGHT", "0.15"))
+RECENCY_WEIGHT = float(os.getenv("RECENCY_WEIGHT", "0.1"))
+RECENCY_HALF_LIFE_DAYS = float(os.getenv("RECENCY_HALF_LIFE_DAYS", "30"))
 # Users with at most this many facts get all of them in every prompt; above it, only the most similar
 ALL_FACTS_LIMIT = int(os.getenv("ALL_FACTS_LIMIT", "100"))
 
