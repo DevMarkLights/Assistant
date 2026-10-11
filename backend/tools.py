@@ -10,8 +10,11 @@ from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import db2
+import homelab
 import memory_writer
-from config import EMBED_MODEL
+import weather
+import websearch
+from config import BRAVE_API_KEY, EMBED_MODEL, HOMELAB_USERS
 from embeddings import embed
 from logs import get_logger
 
@@ -34,6 +37,7 @@ MEMORY_TOOLS = {"remember", "forget"}
 class ToolContext:
     user_id: str
     conversation_id: str
+    username: str = ""
     calls: list[str] = field(default_factory=list)  # names of tools called this turn
 
 
@@ -45,6 +49,7 @@ class Tool:
     fn: Callable[..., Awaitable[str]]
     running: str  # UI label while the tool runs, e.g. "Saving to memory"
     summarize: Callable[[str], tuple[str, str]]  # result -> (UI summary, UI detail)
+    available: Callable[[ToolContext], bool]  # whether this user may use the tool
 
     def schema(self) -> dict:
         return {"type": "function", "function": {
@@ -55,16 +60,18 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
 
-    def tool(self, description: str, parameters: dict, running: str, summarize=None):
+    def tool(self, description: str, parameters: dict, running: str, summarize=None, available=None):
         """Decorator: registers an async fn(ctx, **args) -> str under its function name."""
         def register(fn):
             self._tools[fn.__name__] = Tool(fn.__name__, description, parameters, fn, running,
-                                            summarize or (lambda result: (fn.__name__, result)))
+                                            summarize or (lambda result: (fn.__name__, result)),
+                                            available or (lambda ctx: True))
             return fn
         return register
 
-    def schemas(self) -> list[dict]:
-        return [t.schema() for t in self._tools.values()]
+    def schemas(self, ctx: ToolContext) -> list[dict]:
+        """The tools offered to the model for this user."""
+        return [t.schema() for t in self._tools.values() if t.available(ctx)]
 
     def running_label(self, name: str) -> str:
         tool = self._tools.get(name)
@@ -87,8 +94,9 @@ class ToolRegistry:
 
     async def _run(self, name: str, raw_args: str, ctx: ToolContext) -> str:
         tool = self._tools.get(name)
-        if not tool:
-            return f"Error: unknown tool {name!r}. Available: {', '.join(self._tools)}"
+        if not tool or not tool.available(ctx):
+            offered = [n for n, t in self._tools.items() if t.available(ctx)]
+            return f"Error: unknown tool {name!r}. Available: {', '.join(offered)}"
         try:
             args = json.loads(raw_args) if raw_args and raw_args.strip() else {}
         except json.JSONDecodeError as e:
@@ -223,3 +231,64 @@ async def forget(ctx: ToolContext, description: str = "", fact_id: str | None = 
     return ("Not sure which fact is meant, so nothing was deleted. Ask the user which one to forget "
             "(or whether none of these), then call forget again with that fact's exact text "
             f"as the description:\n{listing}")
+
+
+@registry.tool(
+    description=(
+        "Get current weather and a daily forecast (temperature, conditions, chance of precipitation, "
+        "wind) for a place. Use for questions like 'do I need an umbrella tomorrow?'."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "location": {"type": "string", "description": "City, optionally with state or country, e.g. 'Chicago, IL'."},
+            "days": {"type": "integer", "minimum": 1, "maximum": 7, "description": "Days of forecast, starting today. Default 3."},
+            "units": {"type": "string", "enum": ["imperial", "metric"], "description": "Default imperial (°F, mph)."},
+        },
+        "required": ["location"],
+    },
+    running="Checking the weather",
+    summarize=lambda result: ("Checked the weather", result.splitlines()[0].removesuffix(":")),
+)
+async def get_weather(ctx: ToolContext, location: str, days: int = 3, units: str = "imperial") -> str:
+    return await weather.forecast(location, days, units)
+
+
+@registry.tool(
+    description=(
+        "Search the web for current information: news, recent events, prices, release versions, "
+        "or facts you're unsure of. Returns the top results with titles, URLs, and snippets."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "What to search for."}},
+        "required": ["query"],
+    },
+    running="Searching the web",
+    summarize=lambda result: ("Searched the web", result),
+    available=lambda ctx: bool(BRAVE_API_KEY),
+)
+async def web_search(ctx: ToolContext, query: str) -> str:
+    if not query.strip():
+        return "Error: query is empty"
+    return await websearch.search(query)
+
+
+def _summarize_homelab(result: str) -> tuple[str, str]:
+    overall = next((l for l in result.splitlines() if l.startswith("Overall:")), "")
+    summary = "Pi is healthy" if overall == "Overall: healthy" else "Pi has issues" if overall else "Checked the Pi"
+    return summary, result
+
+
+@registry.tool(
+    description=(
+        "Check the health of the user's home server (the Raspberry Pi this assistant runs on): CPU "
+        "temperature, load, memory, disk space, power/throttling, and whether its services are running."
+    ),
+    parameters={"type": "object", "properties": {}},
+    running="Checking the Pi",
+    summarize=_summarize_homelab,
+    available=lambda ctx: ctx.username.lower() in HOMELAB_USERS,
+)
+async def homelab_stats(ctx: ToolContext) -> str:
+    return await homelab.report()

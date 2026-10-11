@@ -1,11 +1,13 @@
 # Streaming LLM client that routes to Ollama (local) or Groq (cloud) based on the LOCAL config flag.
-# The Groq path can also run a tool-calling loop; Ollama is plain chat.
+# The Groq path can also run a tool-calling loop; Ollama is plain chat. Chat falls back to
+# GROQ_FALLBACK_MODELS when GROQ_MODEL is rate-limited, and every Groq request logs its token usage.
 import json
-from groq import APIError, AsyncGroq
+from groq import APIError, AsyncGroq, RateLimitError
 
 import httpx
 
-from config import OLLAMA_URL, CHAT_MODEL, GROQ_API_KEY, GROQ_MODEL, GROQ_URL, LOCAL, MAX_TOOL_ROUNDS
+from config import (CHAT_MODEL, GROQ_API_KEY, GROQ_FALLBACK_MODELS, GROQ_MODEL, LOCAL, MAX_TOOL_ROUNDS,
+                    OLLAMA_URL)
 from logs import get_logger
 
 log = get_logger("llm")
@@ -17,6 +19,22 @@ if not LOCAL:
     if not GROQ_API_KEY:
         raise RuntimeError("LOCAL=false requires GROQ_API_KEY in .env")
     groq_client = AsyncGroq(api_key=GROQ_API_KEY, timeout=TIMEOUT, max_retries=2)
+
+CHAT_MODELS = [GROQ_MODEL, *GROQ_FALLBACK_MODELS]
+
+
+def _chunk_usage(chunk):
+    """Groq reports token usage on the last streamed chunk, in x_groq.usage."""
+    return chunk.usage or (chunk.x_groq.usage if chunk.x_groq else None)
+
+
+def log_usage(purpose: str, model: str, usage) -> int:
+    """Logs one request's token usage; returns its total so callers can add it up."""
+    if not usage:
+        return 0
+    log.info("%s %s: %d in + %d out = %d tokens", purpose, model,
+             usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+    return usage.total_tokens
 
 
 async def chat_stream(messages: list[dict], tools=None, ctx=None):
@@ -59,12 +77,16 @@ async def _groq_stream(messages: list[dict]):
     if groq_client is None:
         raise RuntimeError("GROQ_API_KEY is not set in .env")
 
-    stream = await groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        stream=True,
-    )
+    for i, model in enumerate(CHAT_MODELS):
+        try:
+            stream = await groq_client.chat.completions.create(model=model, messages=messages, stream=True)
+            break
+        except RateLimitError:
+            if i + 1 == len(CHAT_MODELS):
+                raise
+            log.warning("%s is rate-limited, falling back to %s", model, CHAT_MODELS[i + 1])
     async for chunk in stream:
+        log_usage("chat", model, _chunk_usage(chunk))
         if not chunk.choices:
             continue
         piece = chunk.choices[0].delta.content
@@ -74,20 +96,36 @@ async def _groq_stream(messages: list[dict]):
 
 async def _groq_tool_loop(messages: list[dict], registry, ctx):
     messages = list(messages)
-    rounds = 0
+    requests, tokens = 0, 0
+    try:
+        async for piece in _tool_rounds(messages, registry, ctx):
+            if isinstance(piece, tuple):  # ("usage", tokens) bookkeeping from a finished request
+                requests, tokens = requests + 1, tokens + piece[1]
+                continue
+            yield piece
+    finally:
+        if requests:
+            log.info("message total: %d tokens over %d request(s)", tokens, requests)
+
+
+async def _tool_rounds(messages: list[dict], registry, ctx):
+    rounds, model_index = 0, 0
     while True:
+        model = CHAT_MODELS[model_index]
         # Out of rounds: one last call with tools disabled so the model has to answer
         final = rounds >= MAX_TOOL_ROUNDS
         text, calls = [], {}
         try:
             stream = await groq_client.chat.completions.create(
-                model=GROQ_MODEL,
+                model=model,
                 messages=messages,
-                tools=registry.schemas(),
+                tools=registry.schemas(ctx),
                 tool_choice="none" if final else "auto",
                 stream=True,
             )
             async for chunk in stream:
+                if usage := _chunk_usage(chunk):
+                    yield ("usage", log_usage("chat", model, usage))
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -101,6 +139,15 @@ async def _groq_tool_loop(messages: list[dict], registry, ctx):
                     if tc.function:
                         call["name"] += tc.function.name or ""
                         call["arguments"] += tc.function.arguments or ""
+        except RateLimitError:
+            # Each Groq model has its own limits: retry this round on the next model and stay on it
+            if model_index + 1 == len(CHAT_MODELS):
+                raise
+            model_index += 1
+            log.warning("%s is rate-limited, falling back to %s", model, CHAT_MODELS[model_index])
+            if text:
+                yield {"type": "retract", "chars": len("".join(text))}
+            continue
         except APIError as e:
             # Groq rejects tool calls the model formatted badly, sometimes mid-stream; retry the
             # round instead of failing, and take back any text the failed attempt streamed
@@ -139,11 +186,11 @@ async def _groq_tool_loop(messages: list[dict], registry, ctx):
             yield {"type": "tool_end", "id": c["id"], "name": c["name"], **registry.describe(c["name"], result)}
 
 
-async def complete_json(messages: list[dict]) -> dict:
+async def complete_json(messages: list[dict], model: str | None = None, purpose: str = "json") -> dict:
     if LOCAL:
         text = await _ollama_complete(messages)
     else:
-        text = await _groq_complete(messages)
+        text = await _groq_complete(messages, model or GROQ_MODEL, purpose)
     return _parse_json(text)
 
 
@@ -162,13 +209,14 @@ async def _ollama_complete(messages: list[dict]) -> str:
     return resp.json()["message"]["content"]
 
 
-async def _groq_complete(messages: list[dict]) -> str:
+async def _groq_complete(messages: list[dict], model: str, purpose: str) -> str:
     resp = await groq_client.chat.completions.create(
-        model=GROQ_MODEL,
+        model=model,
         messages=messages,
         temperature=0,
         response_format={"type": "json_object"},
     )
+    log_usage(purpose, model, resp.usage)
     return resp.choices[0].message.content
 
 

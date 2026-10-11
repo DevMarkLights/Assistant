@@ -24,6 +24,19 @@ ALL_FACTS_LIMIT = int(os.getenv("ALL_FACTS_LIMIT", "100"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = os.getenv("GROQ_URL")
+# Groq limits are per model, so background memory work can use its own budget
+MEMORY_MODEL = os.getenv("MEMORY_MODEL", GROQ_MODEL)
+# Tried in order when GROQ_MODEL is rate-limited (comma-separated; empty = no fallback)
+GROQ_FALLBACK_MODELS = [m.strip() for m in os.getenv("GROQ_FALLBACK_MODELS", "openai/gpt-oss-20b").split(",")
+                        if m.strip() and m.strip() != GROQ_MODEL]
+
+# Web search (Brave Search API). Without a key the web_search tool isn't offered to the model.
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+
+# Homelab stats tool: only offered to these usernames (comma-separated; empty = nobody)
+HOMELAB_USERS = {s.strip().lower() for s in os.getenv("HOMELAB_USERS", "").split(",") if s.strip()}
+HOMELAB_SERVICES = [s.strip() for s in os.getenv("HOMELAB_SERVICES", "assistant,nginx,ollama,cloudflared").split(",") if s.strip()]
+HOMELAB_DISKS = [s.strip() for s in os.getenv("HOMELAB_DISKS", "/,/mnt/nvme").split(",") if s.strip()]
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "assistant")
@@ -44,11 +57,14 @@ source. Trust things the user stated directly over earlier assistant replies.
 Never invent memories that are not shown to you."""
 
 # Appended to SYSTEM_PROMPT when tools are available (Groq path)
-TOOLS_PROMPT = """You have tools. Use one only when the user's message needs it:
-- remember: the user explicitly asks you to remember something about them.
-- forget: the user asks you to forget something. If it returns candidates instead of deleting,
-  ask the user which one they mean; never guess.
-- get_current_time: the user asks for the current time, date, or day.
-Answer everything else directly without calling tools. When you call a tool, write your reply
-only after you see its result, not before. After remember or forget, briefly tell the user what
-changed in their memory."""
+TOOLS_PROMPT = """You have tools. Use one only when the user's message needs it; answer
+everything else directly. Today's date and the server time are given below, so don't call a tool
+for the date or the local time.
+- Weather: if the user doesn't say where, use their location from the known facts; if you don't
+  know it, ask.
+- Web search: for current events or facts you aren't sure of. Mention the sources briefly.
+- remember: only when the user explicitly asks you to remember something about them.
+- forget: only when the user asks you to forget something. If it returns candidates instead of
+  deleting, ask the user which one they mean; never guess.
+When you call a tool, write your reply only after you see its result, not before. After remember
+or forget, briefly tell the user what changed in their memory."""

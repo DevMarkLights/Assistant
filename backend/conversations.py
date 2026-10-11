@@ -2,6 +2,10 @@
 # save/retrieve exchanges, and stream LLM replies with semantic memory retrieval injected into context.
 import json
 import os
+import re
+from datetime import datetime
+
+from groq import RateLimitError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -52,6 +56,8 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
     system = SYSTEM_PROMPT
     if not LOCAL:
         system += "\n\n" + TOOLS_PROMPT
+    now = datetime.now().astimezone()
+    system += f"\n\nToday is {now:%A, %B %-d, %Y}. The server's local time is {now:%-I:%M %p %Z}."
     if all_facts:
         if facts:
             system += ("\n\nEverything you know about the user (the complete list; if asked what you "
@@ -103,7 +109,7 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
               len(recent), len(facts), all_facts, len(memories))
     messages = build_messages(recent, facts, all_facts, memories, req.message)
 
-    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id)
+    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"])
 
     # Streams newline-delimited JSON events:
     #   {"type": "text", "text": ...}       a piece of the reply
@@ -138,6 +144,18 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
                         tool_calls.append({k: piece[k] for k in ("name", "ok", "summary", "detail")})
                     if out := event(piece):
                         yield out
+        except RateLimitError as e:
+            log.warning("Groq rate limit: %s", e)
+            # Groq says when to retry, e.g. "Please try again in 7m38.784s"
+            wait = re.search(r"try again in ((?:\d+h)?(?:\d+m)?)([\d.]+s)?", str(e))
+            if wait and wait.group(1):
+                when = f" Try again in about {wait.group(1)}."
+            elif wait:
+                when = " Try again in a few seconds."
+            else:
+                when = " Try again later."
+            yield event({"type": "error", "message": "The AI service's usage limit was reached." + when})
+            return
         except Exception:
             log.exception("reply generation failed")
             yield event({"type": "error", "message": "Something went wrong generating a reply."})
