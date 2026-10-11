@@ -38,6 +38,8 @@ It scores `memory_writer.extract_facts` on `evals/extraction_cases.json` (20 exc
 
 ## Architecture
 
+**Installable (PWA):** `frontend/public/manifest.webmanifest` uses relative URLs (`start_url`/`scope` `./`), so it resolves to `/Assistant/` on any host. Icons are `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` (padded for Android's crop) and `apple-touch-icon.png`, all black logo on white. There's deliberately no service worker yet, so nothing on the phone can serve a stale cached frontend; Chrome installs without one and iOS never needed one.
+
 **Everything is mounted under `/Assistant`.** Vite `base` is `/Assistant/`, all API routes are prefixed `/Assistant/api/...`, and `main.py` mounts the static `dist/` at `/Assistant` last (after the routers, so API routes take precedence). Keep that prefix consistent when adding routes or frontend fetches.
 
 **Configuration** comes from `backend/.env` through `config.py`. `LOCAL` is required (the app crashes on startup if it's unset). It selects the chat LLM:

@@ -6,6 +6,12 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#1c1b19" />
+    <!-- Installable as a home-screen app (PWA); paths are rewritten under /Assistant/ by Vite -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Assistant" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <title>Assistant</title>
     <script>
       try {
