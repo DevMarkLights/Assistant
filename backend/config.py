@@ -28,6 +28,8 @@ ALLOW_SIGNUP = os.getenv("ALLOW_SIGNUP", "true").lower() == "true"
 # Set true when served over HTTPS so the session cookie is never sent in the clear
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
+# FastAPI's interactive docs (/docs, /redoc, /openapi.json) are off unless explicitly enabled
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "false").lower() == "true"
 
 SYSTEM_PROMPT = """You are a personal assistant running on the user's own computer.
 Be concise and helpful.

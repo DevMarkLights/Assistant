@@ -5,7 +5,8 @@ import re
 import secrets
 from datetime import timedelta
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pwdlib import PasswordHash
 
 import db2
@@ -20,6 +21,15 @@ password_hash = PasswordHash.recommended()
 DUMMY_HASH = password_hash.hash("not-a-real-password")
 
 router = APIRouter(prefix="/Assistant/api/auth", tags=["auth"])
+
+API_PREFIX = "/Assistant/api/"
+# The only API routes reachable without a session. Everything else under API_PREFIX,
+# including routes added later and paths that don't exist, gets a 401 when logged out.
+PUBLIC_API_PATHS = {
+    "/Assistant/api/auth/login",
+    "/Assistant/api/auth/register",
+    "/Assistant/api/auth/logout",
+}
 
 
 def _hash_token(token: str) -> str:
@@ -37,8 +47,24 @@ async def _start_session(response: Response, user_id: str):
     )
 
 
-async def current_user(session: str | None = Cookie(default=None)) -> dict:
-    user = await db2.get_session_user(_hash_token(session)) if session else None
+async def _session_user(token: str | None) -> dict | None:
+    return await db2.get_session_user(_hash_token(token)) if token else None
+
+
+async def require_login(request: Request, call_next):
+    """HTTP middleware: default-deny for the API. Stashes the user on request.state."""
+    path = request.url.path
+    if path.startswith(API_PREFIX) and path not in PUBLIC_API_PATHS:
+        user = await _session_user(request.cookies.get(COOKIE_NAME))
+        if not user:
+            return JSONResponse({"detail": "Not logged in"}, status_code=401)
+        request.state.user = user
+    return await call_next(request)
+
+
+async def current_user(request: Request, session: str | None = Cookie(default=None)) -> dict:
+    # The middleware has normally looked the user up already; fall back to the cookie otherwise
+    user = getattr(request.state, "user", None) or await _session_user(session)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
     return user

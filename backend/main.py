@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 import db2
 import conversations
 import auth
+from config import ENABLE_DOCS
 
 
 @asynccontextmanager
@@ -18,7 +19,9 @@ async def lifespan(app: FastAPI):
     yield
     await db2.close_db()
     
-app = FastAPI(title="Personal Assistant", lifespan=lifespan)
+docs = {} if ENABLE_DOCS else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+app = FastAPI(title="Personal Assistant", lifespan=lifespan, **docs)
+app.middleware("http")(auth.require_login)
 app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(memory.router)
