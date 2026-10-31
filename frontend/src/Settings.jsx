@@ -26,6 +26,15 @@ export default function Settings({ api }) {
   const [error, setError] = useState(null);
   const [briefMessage, setBriefMessage] = useState(null);
   const [briefAlreadySent, setBriefAlreadySent] = useState(false);
+  const [briefEnabled, setBriefEnabled] = useState(null); // null while loading
+
+  useEffect(() => {
+    api("/Assistant/api/brief/settings")
+      .then((res) => res.json())
+      .then((body) => setBriefEnabled(body.enabled))
+      .catch((e) => setError(e.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (support !== "ok") return;
@@ -107,6 +116,20 @@ export default function Settings({ api }) {
       );
     });
 
+  const toggleBrief = (enabled) =>
+    run(async () => {
+      setBriefEnabled(enabled);
+      const res = await api("/Assistant/api/brief/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        setBriefEnabled(!enabled);
+        throw new Error(`Couldn't save the setting (${res.status})`);
+      }
+    });
+
   // Manual trigger for testing; the scheduled brief runs on the server every morning
   const sendBrief = (force = false) =>
     run(async () => {
@@ -173,7 +196,20 @@ export default function Settings({ api }) {
       <section>
         <h3>Morning brief</h3>
         <div className="settings-card">
-          <p>Sent every morning with the weather, your home server, and today's reminders.</p>
+          <label className="toggle-row">
+            <span>
+              <strong>Send me a morning brief</strong>
+              <span className="toggle-hint">Every morning: the weather and today's reminders.</span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              className="switch"
+              checked={!!briefEnabled}
+              disabled={busy || briefEnabled === null}
+              onChange={(e) => toggleBrief(e.target.checked)}
+            />
+          </label>
           <div className="settings-actions">
             <button className="primary" onClick={() => sendBrief()} disabled={busy}>
               Send morning brief now

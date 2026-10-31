@@ -280,6 +280,25 @@ async def create_session(token_hash: str, user_id: str, expires_at: datetime):
     await sessions.insert_one({"_id": token_hash, "user_id": user_id, "expires_at": expires_at})
 
 
+async def get_brief_enabled(user_id: str) -> bool | None:
+    """The user's own morning-brief setting, or None if they never changed it."""
+    doc = await users.find_one({"_id": user_id}, {"brief_enabled": 1})
+    return doc.get("brief_enabled") if doc else None
+
+
+async def set_brief_enabled(user_id: str, enabled: bool) -> None:
+    await users.update_one({"_id": user_id}, {"$set": {"brief_enabled": enabled}})
+
+
+async def brief_recipients(default_usernames: set[str]) -> list[dict]:
+    """Users who switched the brief on, plus default users who never changed the setting."""
+    cursor = users.find({"$or": [
+        {"brief_enabled": True},
+        {"brief_enabled": {"$exists": False}, "username": {"$in": sorted(default_usernames)}},
+    ]}, {"username": 1})
+    return [{"id": doc["_id"], "username": doc["username"]} async for doc in cursor]
+
+
 async def get_session_user(token_hash: str) -> dict | None:
     session = await sessions.find_one({"_id": token_hash, "expires_at": {"$gt": now()}})
     if not session:

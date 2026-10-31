@@ -6,13 +6,14 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 import db2
 import homelab
 import push
 import weather
 from auth import current_user
-from config import BRIEF_USERS, HOMELAB_USERS, MEMORY_MODEL, USER_LOCATION, USER_TIMEZONE
+from config import BRIEF_USERS, HOMELAB_USERS, MEMORY_MODEL, USER_TIMEZONE
 from llm import complete_json
 from logs import get_logger
 
@@ -38,13 +39,17 @@ async def reminders_today(user_id: str, now: datetime) -> list[str]:
     return []
 
 
-async def _location(user_id: str) -> str | None:
-    if USER_LOCATION:
-        return USER_LOCATION
+def default_location() -> str:
+    """The city in USER_TIMEZONE, e.g. "America/New_York" -> "New York"."""
+    return USER_TIMEZONE.rsplit("/", 1)[-1].replace("_", " ")
+
+
+async def _location(user_id: str) -> str:
+    """The user's own "lives in ..." fact, or else the city of USER_TIMEZONE."""
     for fact in await db2.list_facts(user_id):
         if match := LIVES_IN.search(fact["text"]):
             return match.group(1)
-    return None
+    return default_location()
 
 
 async def _pi_health() -> str:
@@ -61,14 +66,13 @@ async def gather(user: dict, now: datetime) -> dict:
     """Everything the brief needs, as short notes. Each part fails on its own without stopping the rest."""
     notes = {"date": now.strftime("%A, %B %-d, %Y")}
     location = await _location(user["id"])
-    if location:
-        try:
-            notes["weather"] = await weather.forecast(location, days=1)
-        except Exception:
-            log.warning("brief weather failed for %s", location, exc_info=True)
-            notes["weather"] = "Weather is unavailable right now."
-    else:
-        notes["weather"] = "Location unknown (set USER_LOCATION, or tell the assistant where you live)."
+    try:
+        notes["weather"] = await weather.forecast(location, days=1)
+    except Exception:
+        log.warning("brief weather failed for %s", location, exc_info=True)
+        notes["weather"] = "Weather is unavailable right now."
+    # Server details are private to the owner: only HOMELAB_USERS ever get them, checked here on
+    # the server, so other users' briefs (and their notifications) never include them
     if user["username"].lower() in HOMELAB_USERS:
         try:
             notes["home_server"] = await _pi_health()
@@ -134,17 +138,40 @@ async def run_for_user(user: dict, force: bool = False) -> dict:
     return {"status": "sent", "conversation_id": conversation["id"]}
 
 
+async def is_enabled(user: dict) -> bool:
+    """The user's own setting if they've set one; otherwise on for BRIEF_USERS."""
+    setting = await db2.get_brief_enabled(user["id"])
+    return setting if setting is not None else user["username"].lower() in BRIEF_USERS
+
+
 async def run_scheduled() -> None:
-    """The daily job: briefs for everyone in BRIEF_USERS. Never raises."""
-    for username in sorted(BRIEF_USERS):
+    """The daily job: briefs for everyone who has them switched on. Never raises."""
+    try:
+        recipients = await db2.brief_recipients(BRIEF_USERS)
+    except Exception:
+        log.exception("couldn't load brief recipients")
+        return
+    for user in recipients:
         try:
-            user = await db2.users.find_one({"username": username})
-            if not user:
-                log.warning("BRIEF_USERS lists %r, but there's no such account", username)
-                continue
-            await run_for_user({"id": user["_id"], "username": user["username"]})
+            await run_for_user(user)
         except Exception:
-            log.exception("scheduled brief for %s failed", username)
+            log.exception("scheduled brief for %s failed", user["username"])
+
+
+class BriefSettings(BaseModel):
+    enabled: bool
+
+
+@router.get("/settings")
+async def get_settings(user: dict = Depends(current_user)):
+    return {"enabled": await is_enabled(user)}
+
+
+@router.put("/settings")
+async def update_settings(body: BriefSettings, user: dict = Depends(current_user)):
+    await db2.set_brief_enabled(user["id"], body.enabled)
+    log.info("%s turned the morning brief %s", user["username"], "on" if body.enabled else "off")
+    return {"enabled": body.enabled}
 
 
 @router.post("/run")

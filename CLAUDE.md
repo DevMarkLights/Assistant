@@ -68,8 +68,8 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 - **Time zones:** times are stored in UTC; `USER_TIMEZONE` is used for scheduling, prompts and display. The chat prompt's date comes from it too.
 
 **Morning brief** (`brief.py`):
-- **When and who:** a daily job at `MORNING_BRIEF_TIME` (local time) for the usernames in `BRIEF_USERS`.
-- **What it gathers:** the date; the weather for `USER_LOCATION`, or else the location from a "lives in …" fact; a summary of Pi health (only for `HOMELAB_USERS`); and today's reminders via `reminders_today()`, a hook that Stage 3 fills in. Each part can fail on its own without stopping the rest.
+- **When and who:** a daily job at `MORNING_BRIEF_TIME` (local time) for every user whose brief is on. Each user has a switch in Settings (`GET/PUT /Assistant/api/brief/settings`), stored as `brief_enabled` on the user document. Users who never touched it are on only if they're listed in `BRIEF_USERS`; `db2.brief_recipients` applies that rule.
+- **What it gathers:** the date; the weather for the user's own "lives in …" fact, or else the city in `USER_TIMEZONE` (`America/New_York` gives New York); a summary of Pi health, **only for `HOMELAB_USERS`**, because server details are private to the owner and checked server-side in `gather()`; and today's reminders via `reminders_today()`, a hook that Stage 3 fills in. Each part can fail on its own without stopping the rest.
 - **Writing it:** `MEMORY_MODEL` writes `{brief, summary}`. If the model fails, `_fallback()` builds a plain brief instead.
 - **Saving it:** it's saved as a "Morning brief, <Mon D>" conversation containing one assistant-only exchange: `user_text=""`, no embedding, `embed_model="none"`, so it never appears in retrieval. Then a push is sent with `url=/Assistant/?c=<id>`, which `Chat.jsx` opens.
 - **Once per day:** `db2.claim_brief` inserts a `briefs` document whose `_id` is `<user_id>:<YYYY-MM-DD>`. A failure *before* sending releases the claim so the brief can be retried; after the conversation is saved it counts as sent, so it's never sent twice.

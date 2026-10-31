@@ -55,8 +55,8 @@ VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "https://marks-pi.com")
 USER_TIMEZONE = os.getenv("USER_TIMEZONE", "America/New_York")
 SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "true").lower() == "true"
 MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "07:00")  # HH:MM, local time
+# Users whose morning brief is on by default; each user can switch theirs on or off in Settings
 BRIEF_USERS = {s.strip().lower() for s in os.getenv("BRIEF_USERS", "").split(",") if s.strip()}
-USER_LOCATION = os.getenv("USER_LOCATION", "")  # for the brief's weather; else the "lives in" fact
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "assistant")
