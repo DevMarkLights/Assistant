@@ -10,6 +10,15 @@ if ('serviceWorker' in navigator) {
     .catch((err) => console.warn('Service worker registration failed:', err))
 }
 
+// Opening the app means the user has seen their notifications: clear the Home Screen icon badge
+function clearBadge() {
+  if (document.visibilityState === 'visible' && navigator.clearAppBadge) {
+    navigator.clearAppBadge().catch(() => {})
+  }
+}
+clearBadge()
+document.addEventListener('visibilitychange', clearBadge)
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />
