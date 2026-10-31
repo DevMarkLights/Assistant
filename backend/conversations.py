@@ -5,6 +5,7 @@ import json
 import os
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from groq import RateLimitError
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,7 +15,7 @@ import db2
 from embeddings import embed, cosine_similarity
 from models import ExchangeIn
 from config import (ALL_FACTS_LIMIT, EMBED_MODEL, FACT_TOP_K, HISTORY_TURNS, LOCAL, MIN_SIMILARITY,
-                    SYSTEM_PROMPT, TOOLS_PROMPT, TOP_K)
+                    SYSTEM_PROMPT, TOOLS_PROMPT, TOP_K, USER_TIMEZONE)
 from embeddings import embed
 from llm import chat_stream
 from models import ChatRequest, TitleUpdate
@@ -59,8 +60,8 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
     system = SYSTEM_PROMPT
     if not LOCAL:
         system += "\n\n" + TOOLS_PROMPT
-    now = datetime.now().astimezone()
-    system += f"\n\nToday is {now:%A, %B %-d, %Y}. The server's local time is {now:%-I:%M %p %Z}."
+    now = datetime.now(ZoneInfo(USER_TIMEZONE))
+    system += f"\n\nToday is {now:%A, %B %-d, %Y}. The user's local time is {now:%-I:%M %p %Z}."
     if all_facts:
         if facts:
             system += ("\n\nEverything you know about the user (the complete list; if asked what you "
@@ -76,7 +77,8 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
 
     messages = [{"role": "system", "content": system}]
     for ex in recent:
-        messages.append({"role": "user", "content": ex["user_text"]})
+        if ex["user_text"]:  # empty for assistant-initiated messages like the morning brief
+            messages.append({"role": "user", "content": ex["user_text"]})
         messages.append({"role": "assistant", "content": ex["assistant_text"]})
     messages.append({"role": "user", "content": user_text})
     return messages

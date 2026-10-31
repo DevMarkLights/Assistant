@@ -5,3 +5,4 @@ groq
 pymongo
 pwdlib[argon2]
 pywebpush
+apscheduler>=3.10,<4

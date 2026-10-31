@@ -38,7 +38,7 @@ It scores `memory_writer.extract_facts` on `evals/extraction_cases.json` (20 exc
 
 ## Architecture
 
-**Installable (PWA):** `frontend/public/manifest.webmanifest` uses relative URLs (`start_url`/`scope` `./`), so it resolves to `/Assistant/` on any host. Icons are `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` (padded for Android's crop) and `apple-touch-icon.png`, all black logo on white. `public/sw.js` is a push-only service worker registered in `main.jsx` with scope `/Assistant/`. It deliberately has **no fetch handler and caches nothing**, so the installed app always loads the current frontend. It shows push notifications and, when one is tapped, focuses or opens the app at the notification's `url`. It also sets the Home Screen icon badge (Badging API, iOS 16.4 and later) to the number of notifications showing; the badge isn't set automatically by notifications. `main.jsx` clears it whenever the app is visible.
+**Installable (PWA):** `frontend/public/manifest.webmanifest` uses relative URLs (`start_url`/`scope` `./`), so it resolves to `/Assistant/` on any host. Icons are `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` (padded for Android's crop) and `apple-touch-icon.png`, all black logo on white. `public/sw.js` is a push-only service worker registered in `main.jsx` with scope `/Assistant/`. It deliberately has **no fetch handler and caches nothing**, so the installed app always loads the current frontend. It shows push notifications and, when one is tapped, focuses or opens the app at the notification's `url`. It also sets the Home Screen icon badge (Badging API, iOS 16.4 and later) to the number of notifications showing; the badge isn't set automatically by notifications. `main.jsx` clears it whenever the app is visible. In the user's iPhone testing the badge never appeared, even with Badges allowed. It's harmless, so it was left in.
 
 **Everything is mounted under `/Assistant`.** Vite `base` is `/Assistant/`, all API routes are prefixed `/Assistant/api/...`, and `main.py` mounts the static `dist/` at `/Assistant` last (after the routers, so API routes take precedence). Keep that prefix consistent when adding routes or frontend fetches.
 
@@ -61,6 +61,21 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
   ```bash
   ../.venv/bin/python -c "import base64; from cryptography.hazmat.primitives.asymmetric import ec; from cryptography.hazmat.primitives import serialization as s; b=lambda x: base64.urlsafe_b64encode(x).rstrip(b'=').decode(); k=ec.generate_private_key(ec.SECP256R1()); print('VAPID_PUBLIC_KEY='+b(k.public_key().public_bytes(s.Encoding.X962, s.PublicFormat.UncompressedPoint))); print('VAPID_PRIVATE_KEY='+b(k.private_numbers().private_value.to_bytes(32,'big')))"
   ```
+
+**Scheduler** (`scheduler.py`): APScheduler (3.x) runs inside the FastAPI process, started and stopped in `main.py`'s lifespan. Production has one uvicorn worker (`deploy.sh`), so each job runs once.
+- **`SCHEDULER_ENABLED`:** must be `false` on any other server that shares the database (the Mac). Claims in the database prevent duplicate sends anyway.
+- **Errors:** every job is wrapped in `safe()`, so it can't crash the server.
+- **Time zones:** times are stored in UTC; `USER_TIMEZONE` is used for scheduling, prompts and display. The chat prompt's date comes from it too.
+
+**Morning brief** (`brief.py`):
+- **When and who:** a daily job at `MORNING_BRIEF_TIME` (local time) for the usernames in `BRIEF_USERS`.
+- **What it gathers:** the date; the weather for `USER_LOCATION`, or else the location from a "lives in …" fact; a summary of Pi health (only for `HOMELAB_USERS`); and today's reminders via `reminders_today()`, a hook that Stage 3 fills in. Each part can fail on its own without stopping the rest.
+- **Writing it:** `MEMORY_MODEL` writes `{brief, summary}`. If the model fails, `_fallback()` builds a plain brief instead.
+- **Saving it:** it's saved as a "Morning brief, <Mon D>" conversation containing one assistant-only exchange: `user_text=""`, no embedding, `embed_model="none"`, so it never appears in retrieval. Then a push is sent with `url=/Assistant/?c=<id>`, which `Chat.jsx` opens.
+- **Once per day:** `db2.claim_brief` inserts a `briefs` document whose `_id` is `<user_id>:<YYYY-MM-DD>`. A failure *before* sending releases the claim so the brief can be retried; after the conversation is saved it counts as sent, so it's never sent twice.
+- **Catch-up:** if the server starts within `CATCH_UP` (3 hours) after the brief time, it sends today's brief then.
+- **Manual trigger:** `POST /Assistant/api/brief/run` (with `?force=true` for testing) creates the brief now. Settings has a button for it.
+- **Assistant-only exchanges:** the frontend hides the empty user bubble, and `build_messages` skips empty user turns.
 
 **Retrieval** (`retrieval.py`): chat context and `/memory/search` use hybrid search.
 - **Merge:** vector results (`$vectorSearch`) and keyword results (MongoDB `$text` on the `exchange_text` and `fact_text` indexes, created in `init_db`) are merged by id.

@@ -24,6 +24,8 @@ export default function Settings({ api }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
+  const [briefMessage, setBriefMessage] = useState(null);
+  const [briefAlreadySent, setBriefAlreadySent] = useState(false);
 
   useEffect(() => {
     if (support !== "ok") return;
@@ -105,6 +107,21 @@ export default function Settings({ api }) {
       );
     });
 
+  // Manual trigger for testing; the scheduled brief runs on the server every morning
+  const sendBrief = (force = false) =>
+    run(async () => {
+      setBriefMessage(null);
+      const res = await api(`/Assistant/api/brief/run?force=${force}`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `Error ${res.status}`);
+      setBriefAlreadySent(body.status === "already_sent");
+      setBriefMessage(
+        body.status === "sent" ? "Brief sent. It's in the sidebar, and a notification is on its way."
+          : body.status === "already_sent" ? "Today's brief was already sent."
+          : "The brief failed. Check the server log (assistant.brief)."
+      );
+    });
+
   return (
     <div className="settings">
       <section>
@@ -150,6 +167,24 @@ export default function Settings({ api }) {
           )}
           {message && <p className="settings-message">{message}</p>}
           {error && <p className="error">{error}</p>}
+        </div>
+      </section>
+
+      <section>
+        <h3>Morning brief</h3>
+        <div className="settings-card">
+          <p>Sent every morning with the weather, your home server, and today's reminders.</p>
+          <div className="settings-actions">
+            <button className="primary" onClick={() => sendBrief()} disabled={busy}>
+              Send morning brief now
+            </button>
+            {briefAlreadySent && (
+              <button onClick={() => sendBrief(true)} disabled={busy}>
+                Send another anyway
+              </button>
+            )}
+          </div>
+          {briefMessage && <p className="settings-message">{briefMessage}</p>}
         </div>
       </section>
     </div>

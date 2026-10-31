@@ -49,6 +49,15 @@ VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "https://marks-pi.com")
 
+# Proactive features. All datetimes are stored in UTC; USER_TIMEZONE is for display, prompts, and
+# scheduling. Only one server should run the scheduler (the Pi), so set SCHEDULER_ENABLED=false
+# on dev machines that share the database. Duplicate sends are prevented regardless.
+USER_TIMEZONE = os.getenv("USER_TIMEZONE", "America/New_York")
+SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "true").lower() == "true"
+MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "07:00")  # HH:MM, local time
+BRIEF_USERS = {s.strip().lower() for s in os.getenv("BRIEF_USERS", "").split(",") if s.strip()}
+USER_LOCATION = os.getenv("USER_LOCATION", "")  # for the brief's weather; else the "lives in" fact
+
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "assistant")
 

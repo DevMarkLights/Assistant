@@ -16,6 +16,7 @@ facts = database["facts"]
 users = database["users"]
 sessions = database["sessions"]
 push_subscriptions = database["push_subscriptions"]
+briefs = database["briefs"]
 
 VECTOR_INDEX = "exchange_vector_index"
 FACT_VECTOR_INDEX = "fact_vector_index"
@@ -108,18 +109,20 @@ async def delete_conversation(user_id: str, conversation_id: str) -> bool:
 # ---- exchanges ----
 
 async def add_exchange(user_id: str, conversation_id: str, user_text: str, assistant_text: str,
-                       embedding: list[float], embed_model: str,
+                       embedding: list[float] | None, embed_model: str,
                        tool_calls: list[dict] | None = None) -> str:
+    """user_text may be "" for assistant-initiated messages such as the morning brief."""
     doc = {
         "_id": uuid.uuid4().hex,
         "user_id": user_id,
         "conversation_id": conversation_id,
         "user_text": user_text,
         "assistant_text": assistant_text,
-        "embedding": embedding,
         "embed_model": embed_model,
         "created_at": now(),
     }
+    if embedding is not None:  # without one the exchange is still shown, just not vector-searchable
+        doc["embedding"] = embedding
     if tool_calls:
         doc["tool_calls"] = tool_calls  # what the chat UI shows for each call: name, summary, detail
     await exchanges.insert_one(doc)
@@ -337,3 +340,29 @@ async def list_push_subscriptions(user_id: str) -> list[dict]:
 async def delete_push_subscription(endpoint: str, user_id: str | None = None) -> bool:
     query = {"_id": endpoint} if user_id is None else {"_id": endpoint, "user_id": user_id}
     return (await push_subscriptions.delete_one(query)).deleted_count > 0
+
+
+# ---- morning briefs (one record per user per local date; its _id makes it unique) ----
+
+async def claim_brief(user_id: str, date: str) -> bool:
+    """Claims today's brief for this user. False if one was already started or sent."""
+    try:
+        await briefs.insert_one({"_id": f"{user_id}:{date}", "user_id": user_id, "date": date,
+                                 "status": "creating", "created_at": now()})
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+async def get_brief(user_id: str, date: str) -> dict | None:
+    return await briefs.find_one({"_id": f"{user_id}:{date}"})
+
+
+async def finish_brief(user_id: str, date: str, conversation_id: str) -> None:
+    await briefs.update_one({"_id": f"{user_id}:{date}"},
+                            {"$set": {"status": "sent", "conversation_id": conversation_id, "sent_at": now()}})
+
+
+async def release_brief(user_id: str, date: str) -> None:
+    """Drops a claim whose brief failed before anything was sent, so it can be retried."""
+    await briefs.delete_one({"_id": f"{user_id}:{date}", "status": "creating"})

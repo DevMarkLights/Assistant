@@ -11,13 +11,17 @@ import db2
 import conversations
 import auth
 import notifications
+import brief
+import scheduler
 from config import ENABLE_DOCS
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db2.init_db()
+    scheduler.start()
     yield
+    scheduler.stop()
     await db2.close_db()
     
 docs = {} if ENABLE_DOCS else {"docs_url": None, "redoc_url": None, "openapi_url": None}
@@ -27,6 +31,7 @@ app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(memory.router)
 app.include_router(notifications.router)
+app.include_router(brief.router)
 
 OLLAMA_URL = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"

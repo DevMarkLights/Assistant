@@ -210,7 +210,15 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
   useEffect(() => {
     api("/Assistant/api/conversations")
       .then((res) => res.json())
-      .then(setConversations)
+      .then((list) => {
+        setConversations(list);
+        // A notification can link to a conversation (e.g. the morning brief): /Assistant/?c=<id>
+        const linked = new URLSearchParams(window.location.search).get("c");
+        if (linked) {
+          window.history.replaceState(null, "", window.location.pathname);
+          if (list.some((c) => c.id === linked)) openConversation(linked);
+        }
+      })
       .catch((e) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -246,7 +254,8 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     const exchanges = await res.json();
     setMessages(
       exchanges.flatMap((ex) => [
-        { role: "user", text: ex.user_text },
+        // user_text is empty for assistant-initiated messages such as the morning brief
+        ...(ex.user_text ? [{ role: "user", text: ex.user_text }] : []),
         {
           role: "assistant",
           text: ex.assistant_text,

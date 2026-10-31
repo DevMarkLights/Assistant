@@ -809,6 +809,10 @@ div.tool-call {
   margin-right: auto;
 }
 
+.settings section + section {
+  margin-top: 24px;
+}
+
 .settings h3 {
   font-size: 12px;
   font-weight: 600;
