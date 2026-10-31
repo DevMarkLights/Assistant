@@ -1,6 +1,8 @@
 # Push notification endpoints: the VAPID public key for subscribing, subscribe/unsubscribe a device,
 # and a test notification. Auth comes from the API's default-deny middleware plus current_user.
-from fastapi import APIRouter, Depends, HTTPException, Request
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 import db2
 import push
@@ -9,6 +11,10 @@ from config import VAPID_PUBLIC_KEY
 from models import PushSubscriptionIn, PushUnsubscribe
 
 router = APIRouter(prefix="/Assistant/api/push", tags=["push"])
+
+TEST_TITLE = "Test notification"
+TEST_BODY = "Notifications are working. Tap to open the app."
+_delayed: set[asyncio.Task] = set()  # keeps delayed test sends alive until they finish
 
 
 def _require_configured():
@@ -35,9 +41,19 @@ async def unsubscribe(body: PushUnsubscribe, user: dict = Depends(current_user))
 
 
 @router.post("/test")
-async def test(user: dict = Depends(current_user)):
+async def test(delay: int = Query(0, ge=0, le=60), user: dict = Depends(current_user)):
+    """Sends a test notification, optionally after `delay` seconds so the app can be closed first
+    (that's how real notifications arrive, and it's when the icon badge shows)."""
     _require_configured()
-    sent = await push.send_push(user["id"], "Test notification", "Notifications are working. Tap to open the app.")
-    if not sent:
+    devices = len(await db2.list_push_subscriptions(user["id"]))
+    if not devices:
         raise HTTPException(status_code=409, detail="No device is subscribed. Enable notifications first.")
-    return {"sent": sent}
+    if delay:
+        async def send_later():
+            await asyncio.sleep(delay)
+            await push.send_push(user["id"], TEST_TITLE, TEST_BODY)  # never raises
+        task = asyncio.create_task(send_later())
+        _delayed.add(task)
+        task.add_done_callback(_delayed.discard)
+        return {"scheduled": True, "delay": delay, "devices": devices}
+    return {"sent": await push.send_push(user["id"], TEST_TITLE, TEST_BODY)}

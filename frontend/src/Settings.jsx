@@ -91,12 +91,18 @@ export default function Settings({ api }) {
       setMessage("Notifications are off for this device.");
     });
 
-  const sendTest = () =>
+  // A delayed test lets you close the app first, which is how real notifications (and the icon
+  // badge) show up
+  const sendTest = (delay = 0) =>
     run(async () => {
-      const res = await api("/Assistant/api/push/test", { method: "POST" });
+      const res = await api(`/Assistant/api/push/test?delay=${delay}`, { method: "POST" });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.detail || `Error ${res.status}`);
-      setMessage(`Test sent to ${body.sent} device${body.sent === 1 ? "" : "s"}. It should arrive in a few seconds.`);
+      setMessage(
+        delay
+          ? `Test arrives in about ${delay} seconds. Close the app now to see the banner and the icon badge.`
+          : `Test sent to ${body.sent} device${body.sent === 1 ? "" : "s"}. It should arrive in a few seconds.`
+      );
     });
 
   return (
@@ -128,8 +134,11 @@ export default function Settings({ api }) {
                 )}
                 {state === "on" && (
                   <>
-                    <button className="primary" onClick={sendTest} disabled={busy}>
+                    <button className="primary" onClick={() => sendTest()} disabled={busy}>
                       Send test
+                    </button>
+                    <button onClick={() => sendTest(10)} disabled={busy}>
+                      Send test in 10 seconds
                     </button>
                     <button onClick={disable} disabled={busy}>
                       Turn off
