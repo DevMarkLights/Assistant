@@ -15,6 +15,7 @@ exchanges = database["exchanges"]
 facts = database["facts"]
 users = database["users"]
 sessions = database["sessions"]
+push_subscriptions = database["push_subscriptions"]
 
 VECTOR_INDEX = "exchange_vector_index"
 FACT_VECTOR_INDEX = "fact_vector_index"
@@ -56,6 +57,7 @@ async def init_db():
     # don't count against the free tier's limit of 3 search indexes.
     await exchanges.create_index([("user_text", "text"), ("assistant_text", "text")], name="exchange_text")
     await facts.create_index([("text", "text")], name="fact_text")
+    await push_subscriptions.create_index("user_id")
 
 async def close_db():
     await client.close()
@@ -314,3 +316,24 @@ async def keyword_search_facts(user_id: str, query: str, embed_model: str, limit
         item["keyword_score"], item["embedding"] = doc["keyword_score"], doc["embedding"]
         out.append(item)
     return out
+
+
+# ---- push subscriptions (one per device; the push service's endpoint URL is the id) ----
+
+async def save_push_subscription(user_id: str, endpoint: str, keys: dict, user_agent: str) -> None:
+    # Upsert: re-subscribing the same device (or a different user on it) replaces the record
+    await push_subscriptions.update_one(
+        {"_id": endpoint},
+        {"$set": {"user_id": user_id, "keys": keys, "user_agent": user_agent, "updated_at": now()},
+         "$setOnInsert": {"created_at": now()}},
+        upsert=True,
+    )
+
+
+async def list_push_subscriptions(user_id: str) -> list[dict]:
+    return [doc async for doc in push_subscriptions.find({"user_id": user_id})]
+
+
+async def delete_push_subscription(endpoint: str, user_id: str | None = None) -> bool:
+    query = {"_id": endpoint} if user_id is None else {"_id": endpoint, "user_id": user_id}
+    return (await push_subscriptions.delete_one(query)).deleted_count > 0

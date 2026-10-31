@@ -43,6 +43,12 @@ HOMELAB_USERS = {s.strip().lower() for s in os.getenv("HOMELAB_USERS", "").split
 HOMELAB_SERVICES = [s.strip() for s in os.getenv("HOMELAB_SERVICES", "assistant,nginx,ollama,cloudflared").split(",") if s.strip()]
 HOMELAB_DISKS = [s.strip() for s in os.getenv("HOMELAB_DISKS", "/,/mnt/nvme").split(",") if s.strip()]
 
+# Web Push (VAPID). Generate with the command in CLAUDE.md; the same keys must be on every server,
+# since a phone's subscription is tied to the public key it subscribed with.
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "https://marks-pi.com")
+
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "assistant")
 

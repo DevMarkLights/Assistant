@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 import db2
 import conversations
 import auth
+import notifications
 from config import ENABLE_DOCS
 
 
@@ -25,6 +26,7 @@ app.middleware("http")(auth.require_login)
 app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(memory.router)
+app.include_router(notifications.router)
 
 OLLAMA_URL = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"

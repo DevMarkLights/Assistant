@@ -4,3 +4,4 @@ numpy
 groq
 pymongo
 pwdlib[argon2]
+pywebpush

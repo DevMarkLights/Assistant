@@ -4,6 +4,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import Memory from "./Memory";
+import Settings from "./Settings";
 import { useTheme } from "./theme";
 
 const mobile = window.matchMedia("(max-width: 768px)");
@@ -186,7 +187,9 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [showMemory, setShowMemory] = useState(false);
+  // What the main pane shows: the chat, the Memory list, or Settings
+  const [view, setView] = useState("chat");
+  const inChat = view === "chat";
   // Open by default on desktop, closed (drawer hidden) on phones
   const [sidebarOpen, setSidebarOpen] = useState(() => !mobile.matches);
   const [theme, toggleTheme] = useTheme();
@@ -229,13 +232,13 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     if (mobile.matches) setSidebarOpen(false);
   }
 
-  function openMemory() {
-    setShowMemory(true);
+  function openView(name) {
+    setView(name);
     closeOnMobile();
   }
 
   async function openConversation(id) {
-    setShowMemory(false);
+    setView("chat");
     closeOnMobile();
     setActiveId(id);
     setError(null);
@@ -257,7 +260,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     const res = await api("/Assistant/api/conversations", { method: "POST" });
     const conv = await res.json();
     setConversations((prev) => [conv, ...prev]);
-    setShowMemory(false);
+    setView("chat");
     closeOnMobile();
     setActiveId(conv.id);
     setMessages([]);
@@ -367,7 +370,9 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
   }
 
   const activeConversation = conversations.find((c) => c.id === activeId);
-  const heading = showMemory ? "Memory" : activeConversation ? titleOf(activeConversation) : "New chat";
+  const heading =
+    view === "memory" ? "Memory" : view === "settings" ? "Settings"
+      : activeConversation ? titleOf(activeConversation) : "New chat";
 
   return (
     <div className={`app ${sidebarOpen ? "sidebar-open" : ""}`}>
@@ -391,7 +396,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           {conversations.map((c) => (
             <li
               key={c.id}
-              className={c.id === activeId && !showMemory ? "active" : ""}
+              className={c.id === activeId && inChat ? "active" : ""}
               onClick={() => !busy && !renaming && openConversation(c.id)}
             >
               {renameInput(c, "sidebar") ?? (
@@ -422,11 +427,18 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           ))}
         </ul>
         <button
-          className={`memory-link ${showMemory ? "active" : ""}`}
-          onClick={openMemory}
+          className={`memory-link ${view === "memory" ? "active" : ""}`}
+          onClick={() => openView("memory")}
           disabled={busy}
         >
           Memory
+        </button>
+        <button
+          className={`memory-link ${view === "settings" ? "active" : ""}`}
+          onClick={() => openView("settings")}
+          disabled={busy}
+        >
+          Settings
         </button>
         <div className="account">
           <span className="username">{user.username}</span>
@@ -456,10 +468,10 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
               <MenuIcon />
             </button>
           )}
-          {(activeConversation && !showMemory && renameInput(activeConversation, "topbar")) || (
+          {(activeConversation && inChat && renameInput(activeConversation, "topbar")) || (
             <>
               <span className="heading">{heading}</span>
-              {activeConversation && !showMemory && (
+              {activeConversation && inChat && (
                 <button
                   className="icon-button rename"
                   onClick={() => setRenaming({ id: activeConversation.id, place: "topbar" })}
@@ -482,8 +494,10 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           </button>
         </header>
 
-        {showMemory ? (
+        {view === "memory" ? (
           <Memory api={api} />
+        ) : view === "settings" ? (
+          <Settings api={api} />
         ) : (
           <>
             <div className="messages">
