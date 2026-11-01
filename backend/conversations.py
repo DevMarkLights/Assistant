@@ -17,7 +17,7 @@ from embeddings import embed, cosine_similarity
 from models import ExchangeIn
 from config import (ALL_FACTS_LIMIT, EMBED_MODEL, EXCERPT_CHARS, FACT_TOP_K, HISTORY_TOKENS, HISTORY_TURNS,
                     LATEST_REPLY_CHARS, LOCAL, MIN_SIMILARITY, OLDER_REPLY_CHARS, SYSTEM_PROMPT, TOOLS_PROMPT,
-                    TOP_K, USER_TIMEZONE)
+                    TOP_K, USER_TIMEZONE, VOICE_PROMPT)
 from embeddings import embed
 from llm import chat_stream
 from models import ChatRequest, TitleUpdate
@@ -59,9 +59,12 @@ async def get_exchanges(conversation_id: str, user: dict = Depends(current_user)
     return await db2.list_exchanges(user["id"], conversation_id)
 
 def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memories: list[dict],
-                   user_text: str, tz: ZoneInfo | None = None) -> list[dict]:
-    """tz is the user's own timezone (usertime.py); defaults to USER_TIMEZONE."""
+                   user_text: str, tz: ZoneInfo | None = None, voice: bool = False) -> list[dict]:
+    """tz is the user's own timezone (usertime.py); defaults to USER_TIMEZONE. voice: the reply
+    will be read aloud, so ask for short spoken sentences."""
     system = SYSTEM_PROMPT
+    if voice:
+        system += "\n\n" + VOICE_PROMPT
     if not LOCAL:
         system += "\n\n" + TOOLS_PROMPT
     now = datetime.now(tz or ZoneInfo(USER_TIMEZONE))
@@ -145,7 +148,7 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
 
     log.debug("context: %d recent turns, %d facts (all=%s), %d past exchanges",
               len(recent), len(facts), all_facts, len(memories))
-    messages = build_messages(recent, facts, all_facts, memories, req.message, tz)
+    messages = build_messages(recent, facts, all_facts, memories, req.message, tz, req.voice)
     setup_seconds = time.perf_counter() - started
 
     ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"], tz=tz)

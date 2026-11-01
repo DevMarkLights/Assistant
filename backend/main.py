@@ -15,6 +15,7 @@ import auth
 import notifications
 import brief
 import scheduler
+import tts
 from config import ENABLE_DOCS
 
 
@@ -24,8 +25,10 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     # Load the embedding model in the background so the first message after a restart is fast
     warm_up = asyncio.create_task(embeddings.warm_up())
+    voices = asyncio.create_task(tts.preload())  # Piper voices, for voice mode
     yield
     warm_up.cancel()
+    voices.cancel()
     scheduler.stop()
     await db2.close_db()
     
@@ -37,6 +40,7 @@ app.include_router(conversations.router)
 app.include_router(memory.router)
 app.include_router(notifications.router)
 app.include_router(brief.router)
+app.include_router(tts.router)
 
 OLLAMA_URL = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"

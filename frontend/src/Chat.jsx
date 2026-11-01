@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import Memory from "./Memory";
 import Settings from "./Settings";
+import VoiceMode from "./VoiceMode";
+import { recognitionSupported, unlockSpeech } from "./speech";
 import { useTheme } from "./theme";
 
 const mobile = window.matchMedia("(max-width: 768px)");
@@ -52,6 +54,12 @@ const markdownComponents = {
   a: (props) => <a {...domProps(props)} target="_blank" rel="noopener noreferrer" />,
 };
 
+const MicIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+  </svg>
+);
 const ClockIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="9" />
@@ -338,10 +346,18 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     e.preventDefault();
     const text = input.trim();
     if (!text || busy) return;
-
     setInput("");
+    await sendMessage(text);
+  }
+
+  // Sends a message and streams the reply into the chat. Voice mode uses it too: `voice` asks the
+  // server for a reply suited to reading aloud, and `onEvent` sees every streamed event.
+  // Resolves with { error } once the reply is complete.
+  async function sendMessage(text, { voice = false, onEvent } = {}) {
+    if (busy) return { error: "Still working on the last message." };
     setBusy(true);
     setError(null);
+    let failed = null;
     try {
       const id = activeId ?? (await newConversation());
       setMessages((prev) => [
@@ -354,7 +370,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
         method: "POST",
         // Asks for the event stream; without this header the server sends plain text
         headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, voice }),
       });
       if (!res.ok) throw new Error(`Chat failed: ${res.status}`);
 
@@ -369,8 +385,12 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
         const lines = buffer.split("\n");
         buffer = lines.pop();
         const events = lines.filter(Boolean).map((line) => JSON.parse(line));
+        events.forEach((ev) => onEvent?.(ev));
         const failure = events.find((ev) => ev.type === "error");
-        if (failure) setError(failure.message);
+        if (failure) {
+          failed = failure.message;
+          setError(failure.message);
+        }
         const titled = events.find((ev) => ev.type === "title");
         if (titled) {
           setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title: titled.title } : c)));
@@ -381,10 +401,24 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
         });
       }
     } catch (err) {
+      failed = err.message;
       setError(err.message);
     } finally {
       setBusy(false);
     }
+    return { error: failed };
+  }
+
+  // Voice mode keeps one function for its whole life; this ref always calls the latest sendMessage
+  const sendRef = useRef(sendMessage);
+  sendRef.current = sendMessage;
+  const stableSend = useCallback((text, options) => sendRef.current(text, options), []);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+
+  function openVoice() {
+    unlockSpeech(); // iOS only allows speech after a tap; this is that tap
+    setView("chat");
+    setVoiceOpen(true);
   }
 
   const activeConversation = conversations.find((c) => c.id === activeId);
@@ -556,6 +590,12 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
                 autoFocus={!mobile.matches}
                 enterKeyHint="send"
               />
+              {recognitionSupported && (
+                <button type="button" className="icon-button mic-button" onClick={openVoice} disabled={busy}
+                  aria-label="Talk to the assistant" title="Voice mode">
+                  <MicIcon />
+                </button>
+              )}
               <button type="submit" disabled={busy || !input.trim()}>
                 Send
               </button>
@@ -563,6 +603,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           </>
         )}
       </main>
+      {voiceOpen && <VoiceMode sendMessage={stableSend} onClose={() => setVoiceOpen(false)} />}
     </div>
   );
 }

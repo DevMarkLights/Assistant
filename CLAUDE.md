@@ -25,6 +25,12 @@ cd backend && fastapi dev main.py
 cd frontend && npm run lint
 ```
 
+Piper voices for voice mode are ~60 MB model files kept out of git in `backend/piper_voices/` (or `PIPER_VOICES_DIR`). Install them on each server, from `backend/`, then restart; see https://huggingface.co/rhasspy/piper-voices for the other voice names:
+
+```bash
+../.venv/bin/python -m piper.download_voices --download-dir piper_voices en_GB-alan-medium en_GB-northern_english_male-medium
+```
+
 There are no unit tests. There is an extraction eval, run from `backend/`:
 
 ```bash
@@ -95,6 +101,17 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
   If none of those apply, it returns candidate labels for the model to ask about.
 - **Sending:** the scheduler's job runs **every 10 seconds** (`reminders.send_due`, one indexed query per check), so a reminder is at most about 10 seconds late. With the earlier once-a-minute job they arrived up to 59 seconds late. It claims due reminders one at a time with `find_one_and_update` (pending → sending), so concurrent jobs, or a second server, can never send one twice. Each push links to the chat the reminder was set in. A reminder that fails mid-send stays in `sending` and is not retried: missing one is better than sending it twice.
 - **Morning brief:** includes the pending reminders due for the rest of the day, via `brief.reminders_today`.
+
+**Voice mode** (`speech.js`, `VoiceMode.jsx`): browser-only speech, with **no Whisper and no server-side audio** (a deliberate choice).
+- **Listening:** `SpeechRecognition` (or `webkitSpeechRecognition`) recognises one utterance at a time and stops on a pause. The mic button in the composer only appears where it exists. Safari uses Apple's recognizer (iOS needs Siri & Dictation on) and Chrome uses Google's.
+- **Speaking:** Settings → Voice offers two sources, saved per browser in localStorage (`voiceEngine`, `voiceURI`, `piperVoice`):
+  - **This device's voices** use `speechSynthesis`. "Automatic" prefers an en-GB voice. `loadVoices()` waits for the asynchronously loaded voice list before choosing; otherwise the first reply used the system default and later ones a different voice.
+  - **Piper voices** are generated on the server by `tts.py` (`GET /Assistant/api/tts/voices`, `POST /Assistant/api/tts` returning WAV). They're played through one shared `Audio` element. Piper is imported lazily, voices are preloaded at startup (`tts.preload`), synthesis runs in a worker thread with one lock per voice, and only installed voice ids are accepted. If Piper fails, `speak()` falls back to the device voice.
+  - **iOS unlock:** iOS only allows speech and audio after a gesture, so `unlockSpeech()` runs in the tap that opens voice mode. It speaks a silent utterance and plays a silent clip on the shared player.
+- **The overlay:** a full-screen layer over the chat with an orb whose CSS states are idle, listening, thinking, speaking and error. `converse()` loops listen → `sendMessage(text, {voice: true, onEvent})` → `speak(speakable(reply))` → listen again, until closed or nothing is heard.
+- **Tapping the orb:** while listening it ends the utterance, while speaking it interrupts, and when idle it starts again.
+- **Same pipeline as typing:** messages go through the normal chat path, so they appear in the chat with tools, memory and titles as usual. `Chat.jsx` passes voice mode a `sendMessage` that never changes, through a ref, because a new function on each render would restart the loop.
+- **Spoken replies:** `voice: true` on `ChatRequest` adds `VOICE_PROMPT` (short spoken sentences, no Markdown). `speakable()` still strips Markdown and links, and replaces code and tables with "shown in the chat".
 
 **Retrieval** (`retrieval.py`): chat context and `/memory/search` use hybrid search.
 - **Merge:** vector results (`$vectorSearch`) and keyword results (MongoDB `$text` on the `exchange_text` and `fact_text` indexes, created in `init_db`) are merged by id.

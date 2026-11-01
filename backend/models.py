@@ -30,6 +30,7 @@ class TitleUpdate(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
+    voice: bool = False  # sent from voice mode: the reply will be read aloud
 
 class Credentials(BaseModel):
     username: str = Field(min_length=1, max_length=64)

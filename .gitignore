@@ -5,3 +5,5 @@
 /frontend/dist/
 
 __*
+# Piper voice models (large; download on each server, see CLAUDE.md)
+/backend/piper_voices/

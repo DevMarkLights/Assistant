@@ -71,6 +71,9 @@ MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "07:00")  # HH:MM, local ti
 # Users whose morning brief is on by default; each user can switch theirs on or off in Settings
 BRIEF_USERS = {s.strip().lower() for s in os.getenv("BRIEF_USERS", "").split(",") if s.strip()}
 
+# Piper voice models for server-side text-to-speech (voice mode). Relative to backend/ by default.
+PIPER_VOICES_DIR = os.getenv("PIPER_VOICES_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "piper_voices"))
+
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "assistant")
 
@@ -88,6 +91,11 @@ You may be given known facts about the user and excerpts from past conversations
 Use them when they are relevant to the current message. Facts are the most reliable
 source. Trust things the user stated directly over earlier assistant replies.
 Never invent memories that are not shown to you."""
+
+# Added when the message came from voice mode, where the reply is read aloud
+VOICE_PROMPT = """The user is talking to you by voice and your reply will be read aloud. Answer in
+short, natural spoken sentences: no Markdown, tables, lists, code, or URLs, and no emoji. Keep it
+brief (a few sentences) unless they ask for detail. Say numbers and times the way people speak them."""
 
 # Appended to SYSTEM_PROMPT when tools are available (Groq path)
 TOOLS_PROMPT = """Use a tool only when the message needs it; otherwise answer directly. The date
