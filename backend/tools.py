@@ -4,6 +4,7 @@
 # and every call and result is logged to the terminal.
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Awaitable, Callable
@@ -41,6 +42,7 @@ class ToolContext:
     username: str = ""
     tz: ZoneInfo = field(default_factory=lambda: ZoneInfo(USER_TIMEZONE))  # the user's own timezone
     calls: list[str] = field(default_factory=list)  # names of tools called this turn
+    tool_seconds: float = 0.0  # total time spent running tools this turn
 
 
 @dataclass
@@ -89,7 +91,9 @@ class ToolRegistry:
 
     async def call(self, name: str, raw_args: str, ctx: ToolContext) -> str:
         ctx.calls.append(name)
+        started = time.perf_counter()
         result = await self._run(name, raw_args, ctx)
+        ctx.tool_seconds += time.perf_counter() - started
         level = logging.WARNING if result.startswith("Error:") else logging.INFO
         log.log(level, "%s(%s) -> %s", name, raw_args or "", result)
         return result
@@ -300,8 +304,7 @@ def _summarize_cancel(result: str) -> tuple[str, str]:
     if result.startswith("Cancelled:"):
         return "Cancelled a reminder", result.removeprefix("Cancelled: ")
     if result.startswith("Not sure"):
-        candidates = [line.split(" (reminder_id=")[0].removeprefix("- ") for line in result.splitlines()
-                      if line.startswith("- ")]
+        candidates = [line.removeprefix("- ") for line in result.splitlines() if line.startswith("- ")]
         return "Asked which reminder to cancel", "\n".join(candidates)
     return "No reminder cancelled", result
 
@@ -337,7 +340,7 @@ async def remind_me(ctx: ToolContext, text: str, due_at: str) -> str:
     parameters={"type": "object", "properties": {}},
     running="Checking your reminders",
     summarize=lambda result: ("Checked your reminders", "\n".join(
-        line.split(" (reminder_id=")[0].removeprefix("- ") for line in result.splitlines())),
+        line.removeprefix("- ") for line in result.splitlines())),
 )
 async def list_reminders(ctx: ToolContext) -> str:
     return await reminders.upcoming_lines(ctx.user_id, ctx.tz)
@@ -345,19 +348,19 @@ async def list_reminders(ctx: ToolContext) -> str:
 
 @registry.tool(
     description=(
-        "Cancel one of the user's upcoming reminders. Pass a description; it's cancelled only if one "
-        "reminder clearly matches. Otherwise you get candidates back: ask the user which one, then call "
-        "again with that reminder's exact text (or its reminder_id in the same turn)."
+        "Cancel one of the user's upcoming reminders. Pass a description, including the time if it "
+        "helps (e.g. 'the 3pm stretch reminder'); it's cancelled only if one reminder clearly matches. "
+        "Otherwise you get candidates back: ask the user which one, then call again with that line exactly."
     ),
     parameters={
         "type": "object",
         "properties": {
             "description": {"type": "string", "description": "Which reminder, e.g. 'the dentist one'."},
-            "reminder_id": {"type": "string", "description": "Exact id from list_reminders or a previous call."},
         },
+        "required": ["description"],
     },
     running="Cancelling a reminder",
     summarize=_summarize_cancel,
 )
-async def cancel_reminder(ctx: ToolContext, description: str = "", reminder_id: str | None = None) -> str:
-    return await reminders.cancel(ctx.user_id, ctx.tz, description, reminder_id)
+async def cancel_reminder(ctx: ToolContext, description: str) -> str:
+    return await reminders.cancel(ctx.user_id, ctx.tz, description)

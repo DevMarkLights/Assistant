@@ -7,7 +7,7 @@ from groq import APIError, AsyncGroq, RateLimitError
 import httpx
 
 from config import (CHAT_MODEL, GROQ_API_KEY, GROQ_FALLBACK_MODELS, GROQ_MODEL, LOCAL, MAX_TOOL_ROUNDS,
-                    OLLAMA_URL)
+                    OLLAMA_URL, REASONING_EFFORT)
 from logs import get_logger
 
 log = get_logger("llm")
@@ -21,6 +21,11 @@ if not LOCAL:
     groq_client = AsyncGroq(api_key=GROQ_API_KEY, timeout=TIMEOUT, max_retries=2)
 
 CHAT_MODELS = [GROQ_MODEL, *GROQ_FALLBACK_MODELS]
+
+
+def model_options(model: str) -> dict:
+    """Extra request options for a model: reasoning effort applies to gpt-oss models only."""
+    return {"reasoning_effort": REASONING_EFFORT} if REASONING_EFFORT and "gpt-oss" in model else {}
 
 
 def _chunk_usage(chunk):
@@ -79,7 +84,8 @@ async def _groq_stream(messages: list[dict]):
 
     for i, model in enumerate(CHAT_MODELS):
         try:
-            stream = await groq_client.chat.completions.create(model=model, messages=messages, stream=True)
+            stream = await groq_client.chat.completions.create(model=model, messages=messages, stream=True,
+                                                               **model_options(model))
             break
         except RateLimitError:
             if i + 1 == len(CHAT_MODELS):
@@ -122,6 +128,7 @@ async def _tool_rounds(messages: list[dict], registry, ctx):
                 tools=registry.schemas(ctx),
                 tool_choice="none" if final else "auto",
                 stream=True,
+                **model_options(model),
             )
             async for chunk in stream:
                 if usage := _chunk_usage(chunk):
@@ -215,6 +222,7 @@ async def _groq_complete(messages: list[dict], model: str, purpose: str) -> str:
         messages=messages,
         temperature=0,
         response_format={"type": "json_object"},
+        **model_options(model),
     )
     log_usage(purpose, model, resp.usage)
     return resp.choices[0].message.content

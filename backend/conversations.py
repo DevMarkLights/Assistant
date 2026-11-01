@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -89,13 +90,20 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
 @router.post("/{conversation_id}/chat")
 async def chat(conversation_id: str, req: ChatRequest, request: Request,
                user: dict = Depends(current_user)):
+    started = time.perf_counter()
     user_id = user["id"]
-    conversation = await db2.get_conversation(user_id, conversation_id)
+    # Independent lookups run at the same time. Facts: one past the limit, to learn whether the
+    # user has more facts than fit in the prompt.
+    conversation, history, query_vec, facts = await asyncio.gather(
+        db2.get_conversation(user_id, conversation_id),
+        db2.list_exchanges(user_id, conversation_id),
+        embed(req.message, "query"),
+        db2.list_facts(user_id, limit=ALL_FACTS_LIMIT + 1),
+    )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
-
-    history = await db2.list_exchanges(user_id, conversation_id)
     recent = history[-HISTORY_TURNS:]
+    all_facts = len(facts) <= ALL_FACTS_LIMIT
 
     # Untitled chats get a title from their first message, generated while the reply streams
     title_task = None
@@ -103,22 +111,22 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
         first_message = history[0]["user_text"] if history else req.message
         title_task = asyncio.create_task(titles.generate(first_message))
 
-    query_vec = await embed(req.message, "query")
-    memories = await retrieval.recall_exchanges(
-        user_id, req.message, query_vec, top_k=TOP_K, min_similarity=MIN_SIMILARITY,
-        exclude_ids=[ex["id"] for ex in recent],
+    # Second wave, also in parallel: memory search, the user's timezone (reusing the facts just
+    # loaded when they're all there), and the relevant facts if there are too many to send them all
+    memories, tz, relevant_facts = await asyncio.gather(
+        retrieval.recall_exchanges(user_id, req.message, query_vec, top_k=TOP_K, min_similarity=MIN_SIMILARITY,
+                                   exclude_ids=[ex["id"] for ex in recent]),
+        usertime.user_zone(user_id, facts if all_facts else None),
+        retrieval.recall_facts(user_id, req.message, query_vec, FACT_TOP_K, MIN_SIMILARITY)
+        if not all_facts else asyncio.sleep(0, result=None),
     )
-
-    # Fetch one past the limit to learn whether the user has more facts than fit
-    facts = await db2.list_facts(user_id, limit=ALL_FACTS_LIMIT + 1)
-    all_facts = len(facts) <= ALL_FACTS_LIMIT
     if not all_facts:
-        facts = await retrieval.recall_facts(user_id, req.message, query_vec, FACT_TOP_K, MIN_SIMILARITY)
+        facts = relevant_facts
 
     log.debug("context: %d recent turns, %d facts (all=%s), %d past exchanges",
               len(recent), len(facts), all_facts, len(memories))
-    tz = await usertime.user_zone(user_id)
     messages = build_messages(recent, facts, all_facts, memories, req.message, tz)
+    setup_seconds = time.perf_counter() - started
 
     ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"], tz=tz)
 
@@ -143,10 +151,12 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
         return "\n\n[Something went wrong generating a reply.]" if data["type"] == "error" else ""
 
     async def generate():
-        reply, tool_calls = "", []
+        reply, tool_calls, first_text = "", [], None
         try:
             async for piece in chat_stream(messages, tools=tools.registry, ctx=ctx):
                 if isinstance(piece, str):
+                    if first_text is None:
+                        first_text = time.perf_counter() - started
                     reply += piece
                     yield event({"type": "text", "text": piece})
                 else:
@@ -184,17 +194,39 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
                 if out := event({"type": "title", "title": title}):
                     yield out
 
-        reply = reply.strip()
-        vec = await embed(f"User: {req.message}\nAssistant: {reply}", "document")
-        await db2.add_exchange(user_id, conversation_id, req.message, reply, vec, EMBED_MODEL, tool_calls)
-        # An explicit remember/forget already updated memory; running the background extractor on
-        # the same message could undo it (e.g. saving "The user wants to forget X" after a forget)
-        if tools.MEMORY_TOOLS.intersection(ctx.calls):
-            log.info("skipping background extraction: memory tools ran this turn")
-        else:
-            memory_writer.schedule(user_id, conversation_id, req.message, reply)
+        log.info("timing: first text after %s, done in %.1fs (setup %.0fms, tools %.1fs%s)",
+                 f"{first_text:.1f}s" if first_text is not None else "-", time.perf_counter() - started,
+                 setup_seconds * 1000, ctx.tool_seconds, f", {', '.join(ctx.calls)}" if ctx.calls else "")
+        # Saving happens after the stream closes, so the user can type again right away
+        _spawn(_save_exchange(user_id, conversation_id, req.message, reply.strip(), tool_calls, list(ctx.calls)))
 
     return StreamingResponse(generate(), media_type="application/x-ndjson" if ndjson else "text/plain")
+
+
+_background: set[asyncio.Task] = set()  # keeps post-reply saves alive until they finish
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _save_exchange(user_id: str, conversation_id: str, user_text: str, reply: str,
+                         tool_calls: list[dict], calls: list[str]) -> None:
+    """Embeds and stores the exchange, then starts memory extraction. Never raises."""
+    try:
+        vec = await embed(f"User: {user_text}\nAssistant: {reply}", "document")
+        await db2.add_exchange(user_id, conversation_id, user_text, reply, vec, EMBED_MODEL, tool_calls)
+    except Exception:
+        log.exception("saving the exchange failed (conversation %s)", conversation_id)
+        return
+    # An explicit remember/forget already updated memory; running the background extractor on
+    # the same message could undo it (e.g. saving "The user wants to forget X" after a forget)
+    if tools.MEMORY_TOOLS.intersection(calls):
+        log.info("skipping background extraction: memory tools ran this turn")
+    else:
+        memory_writer.schedule(user_id, conversation_id, user_text, reply)
 
 @router.patch("/{conversation_id}")
 async def rename_conversation(conversation_id: str, body: TitleUpdate,

@@ -84,7 +84,13 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 - **Storage:** the `reminders` collection holds `text`, `due_at` (UTC), `status` (`pending` → `sending` → `sent`, or `cancelled`), `conversation_id`, `user_id` and `created_at`.
 - **`remind_me(text, due_at)`:** the model converts "tomorrow at 3pm" into ISO 8601 using the date and local time in the system prompt. A time without an offset is taken as the user's own timezone, and times are shown in it. Past or unparseable times come back as `Error:` strings.
 - **`list_reminders`:** lists pending reminders.
-- **`cancel_reminder`:** works like `forget`. It compares meaning on the fly, by embedding each pending reminder with its time, cancels only when the best match is at least 0.6 and leads the next by 0.1, and otherwise returns candidates for the model to ask about.
+- **No ids reach the model:** `list_reminders` and the cancel candidates show reminders as "Stretch at Mon Nov 2, 3:00 PM" (`reminders.label`), never by id, because the model repeats whatever it sees.
+- **`cancel_reminder(description)`** cancels:
+  1. an exact label match;
+  2. otherwise, if the request names a clock time ("5pm", "5:30 pm", "17:00"; a bare hour needs am or pm), the candidates are narrowed to reminders at that time, and **exactly one** match is cancelled on the strength of the time alone;
+  3. otherwise the best meaning match, provided it's at least 0.6 and leads the next by 0.1.
+
+  If none of those apply, it returns candidate labels for the model to ask about.
 - **Sending:** the scheduler's job runs every minute (`reminders.send_due`). It claims due reminders one at a time with `find_one_and_update` (pending → sending), so concurrent jobs, or a second server, can never send one twice. Each push links to the chat the reminder was set in. A reminder that fails mid-send stays in `sending` and is not retried: missing one is better than sending it twice.
 - **Morning brief:** includes the pending reminders due for the rest of the day, via `brief.reminders_today`.
 
@@ -99,12 +105,19 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 
 **Titles** (`titles.py`): when a chat has no title, `chat` starts a `MEMORY_MODEL` title task from the chat's first message alongside the reply. When the reply is done it saves the title with `set_title_if_empty`, which won't overwrite a rename made in the meantime, and emits a `title` event that `Chat.jsx` applies to the sidebar.
 
+**Speed** (the Pi is slow, so these matter):
+- **Embeddings:** `embeddings.py` sends `keep_alive` (`OLLAMA_KEEP_ALIVE`, default `-1`, meaning forever) with every Ollama call, and `main.py` warms the model up at startup. Ollama's own default unloads the model after 5 idle minutes, and reloading it on the Pi's 4 cores cost seconds per message. One shared `httpx` client reuses connections.
+- **Reasoning:** `llm.model_options` sends `reasoning_effort` (`REASONING_EFFORT`, default `low`) to gpt-oss models on every call, chat and background alike. Hidden reasoning delays the first visible word and uses tokens.
+- **Parallel setup:** `chat` runs its lookups in two `asyncio.gather` waves (about 60–100 ms instead of about 300 ms in testing). First the conversation, history, query embedding and facts; then memory search, the timezone (reusing the facts already loaded) and fact search. `recall_*` runs its vector and keyword searches concurrently too.
+- **Background save:** the stream closes as soon as the reply (and any title) is done. Embedding and saving the exchange, then memory extraction, happen afterwards in `_save_exchange` via `_spawn`, so the send box unlocks right away. A failed save is logged.
+- **Timing log:** each message logs `assistant.chat: timing: first text after Xs, done in Ys (setup Zms, tools Ts, <tools used>)`. `ToolContext.tool_seconds` adds up the time spent in tools.
+
 **Chat request flow** (`conversations.py` `POST /{id}/chat`):
 1. Load the last `HISTORY_TURNS` exchanges of the conversation.
 2. Embed the message as a query and retrieve `TOP_K` similar past exchanges, skipping the recent ones already in context and filtering by `MIN_SIMILARITY`. Facts work differently. If the user has `ALL_FACTS_LIMIT` (100) facts or fewer, all of them go into the prompt, labelled as the complete list, so "what do you know about me" gets every fact. Above that limit, only the `FACT_TOP_K` most similar facts are included.
 3. `build_messages` adds the facts and memory excerpts to `SYSTEM_PROMPT`, then appends the recent turns as chat messages.
 4. Stream the reply as newline-delimited JSON (`application/x-ndjson`), but only when the request sends `Accept: application/x-ndjson`. Without that header the server streams plain text, so a browser tab still running an older frontend keeps working after a deploy. Each line is one event: `{"type":"text","text":...}`, `tool_start` (id, name, label), `tool_end` (id, name, ok, summary, detail), `retract` (`chars`: drop that much trailing text), `title`, or `error`; an error means nothing is saved. The frontend splits the stream on newlines (keeping any partial last line for the next read) and folds the events into the message with `applyEvent` in `Chat.jsx`.
-5. Once the stream finishes, embed and save the exchange, including `tool_calls` (name, ok, summary, detail) so the UI's tool chips come back when the chat is reopened. Then call `memory_writer.schedule(...)`.
+5. Once the stream finishes, embed and save the exchange in the background, including `tool_calls` (name, ok, summary, detail) so the UI's tool chips come back when the chat is reopened. Then call `memory_writer.schedule(...)`.
 
 **Fact memory** (`memory_writer.py`) runs as a fire-and-forget asyncio task after each exchange:
 1. The LLM extracts durable user facts as JSON (`complete_json`, temperature 0, JSON mode).

@@ -1,5 +1,7 @@
 # FastAPI application entry point: registers routers, initializes the database on startup,
 # and exposes health-check and embedding-comparison endpoints. Serves the built frontend as static files.
+import asyncio
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -20,7 +22,10 @@ from config import ENABLE_DOCS
 async def lifespan(app: FastAPI):
     await db2.init_db()
     scheduler.start()
+    # Load the embedding model in the background so the first message after a restart is fast
+    warm_up = asyncio.create_task(embeddings.warm_up())
     yield
+    warm_up.cancel()
     scheduler.stop()
     await db2.close_db()
     

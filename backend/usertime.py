@@ -20,18 +20,19 @@ def default_location() -> str:
     return USER_TIMEZONE.rsplit("/", 1)[-1].replace("_", " ")
 
 
-async def user_location(user_id: str) -> str | None:
-    """The place from the user's "lives in ..." fact, if they have one."""
-    for fact in await db2.list_facts(user_id):
+async def user_location(user_id: str, facts: list[dict] | None = None) -> str | None:
+    """The place from the user's "lives in ..." fact, if they have one. Pass `facts` (all of the
+    user's facts) if they're already loaded, to save a database round trip."""
+    for fact in facts if facts is not None else await db2.list_facts(user_id):
         if match := LIVES_IN.search(fact["text"]):
             return match.group(1)
     return None
 
 
-async def user_timezone(user_id: str) -> str:
+async def user_timezone(user_id: str, facts: list[dict] | None = None) -> str:
     """IANA timezone name for the user. Never raises."""
     try:
-        location = await user_location(user_id)
+        location = await user_location(user_id, facts)
         if not location:
             return USER_TIMEZONE
         cached, cached_for = await db2.get_timezone_cache(user_id)
@@ -56,5 +57,5 @@ async def user_timezone(user_id: str) -> str:
         return USER_TIMEZONE
 
 
-async def user_zone(user_id: str) -> ZoneInfo:
-    return ZoneInfo(await user_timezone(user_id))
+async def user_zone(user_id: str, facts: list[dict] | None = None) -> ZoneInfo:
+    return ZoneInfo(await user_timezone(user_id, facts))

@@ -7,6 +7,7 @@
 # from today and halves every RECENCY_HALF_LIFE_DAYS. A result is kept if its similarity clears
 # min_similarity or it matched a keyword. Dedupe (remember) and forget keep using plain vector
 # search, since their thresholds were calibrated on raw similarity.
+import asyncio
 from datetime import datetime, timezone
 
 import db2
@@ -49,15 +50,17 @@ async def recall_exchanges(user_id: str, query: str, query_vec: list[float], top
                            min_similarity: float, exclude_ids=()) -> list[dict]:
     excluded = set(exclude_ids)
     n = top_k * CANDIDATES
-    vector = await db2.search_exchanges(user_id, query_vec, EMBED_MODEL, n, 0.0, exclude_ids=excluded)
-    keyword = [h for h in await db2.keyword_search_exchanges(user_id, query, EMBED_MODEL, n)
-               if h["id"] not in excluded]
+    vector, keyword = await asyncio.gather(
+        db2.search_exchanges(user_id, query_vec, EMBED_MODEL, n, 0.0, exclude_ids=excluded),
+        db2.keyword_search_exchanges(user_id, query, EMBED_MODEL, n))
+    keyword = [h for h in keyword if h["id"] not in excluded]
     return rank(vector, keyword, query_vec, "created_at", top_k, min_similarity)
 
 
 async def recall_facts(user_id: str, query: str, query_vec: list[float], top_k: int,
                        min_similarity: float) -> list[dict]:
     n = top_k * CANDIDATES
-    vector = await db2.search_facts(user_id, query_vec, EMBED_MODEL, n, 0.0)
-    keyword = await db2.keyword_search_facts(user_id, query, EMBED_MODEL, n)
+    vector, keyword = await asyncio.gather(
+        db2.search_facts(user_id, query_vec, EMBED_MODEL, n, 0.0),
+        db2.keyword_search_facts(user_id, query, EMBED_MODEL, n))
     return rank(vector, keyword, query_vec, "updated_at", top_k, min_similarity)

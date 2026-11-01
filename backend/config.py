@@ -13,6 +13,12 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "6"))
+# How long Ollama keeps the embedding model loaded after a call: -1 = always (the default here),
+# or a duration like "24h". Ollama's own default of 5 minutes means slow reloads on the Pi.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "-1")
+# Hidden reasoning before gpt-oss writes its first visible word: low, medium, or high (Groq's
+# default is medium). Lower is faster and uses fewer tokens. Only sent to gpt-oss models.
+REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")
 # Tool-calling rounds per message before the model must answer without tools (Groq only)
 MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "5"))
 MIN_SIMILARITY = float(os.getenv("MIN_SIMILARITY", "0.5"))

@@ -3,6 +3,7 @@
 # A job runs every minute (scheduler.py) and sends what's due. Each reminder is claimed with an
 # atomic pending -> sending update before its push goes out, so it can never be sent twice, even
 # with two servers running the job.
+import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,22 @@ log = get_logger("reminders")
 # cancel_reminder uses the same rule as the forget tool: cancel only a clear best match
 CANCEL_CONFIDENT = 0.6
 CANCEL_MARGIN = 0.1
+# A clock time in a cancel request, e.g. "5pm", "5:30 pm", "17:00" (an hour alone needs am/pm)
+CLOCK = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b(\d{1,2}):(\d{2})\b", re.IGNORECASE)
+
+
+def mentioned_times(text: str) -> list[tuple[int, int | None]]:
+    """(hour 0-23, minute or None) for each clock time in the text."""
+    times = []
+    for m in CLOCK.finditer(text):
+        if m.group(3):
+            hour, minute = int(m.group(1)) % 12, m.group(2)
+            hour += 12 if m.group(3).lower() == "pm" else 0
+        else:
+            hour, minute = int(m.group(4)), m.group(5)
+        if hour < 24:
+            times.append((hour, int(minute) if minute else None))
+    return times
 
 
 def display(dt: datetime, tz: ZoneInfo) -> str:
@@ -53,36 +70,49 @@ async def upcoming_lines(user_id: str, tz: ZoneInfo) -> str:
     pending = await db2.list_pending_reminders(user_id)
     if not pending:
         return "No upcoming reminders."
-    return "\n".join(f"- {display(r['due_at'], tz)}: {r['text']} (reminder_id={r['_id']})" for r in pending)
+    # No ids here: whatever the model sees, it may repeat to the user
+    return "\n".join(f"- {label(r, tz)}" for r in pending)
 
 
-async def cancel(user_id: str, tz: ZoneInfo, description: str = "", reminder_id: str | None = None) -> str:
+def label(reminder: dict, tz: ZoneInfo) -> str:
+    """How a reminder is shown and referred to, e.g. "Call mom at Tue Nov 3, 3:00 PM"."""
+    return f"{reminder['text']} at {display(reminder['due_at'], tz)}"
+
+
+async def cancel(user_id: str, tz: ZoneInfo, description: str) -> str:
     pending = await db2.list_pending_reminders(user_id)
-    if reminder_id:
-        target = next((r for r in pending if r["_id"] == reminder_id), None)
-        if not target:
-            return f"Error: no upcoming reminder with id {reminder_id!r}. Nothing was cancelled."
+    if not pending:
+        return "There are no upcoming reminders to cancel."
+    if not description.strip():
+        return "Error: describe the reminder to cancel, e.g. 'the 3pm stretch reminder'."
+    wanted = description.strip().lower()
+    exact = [r for r in pending if wanted == label(r, tz).lower()]
+    if len(exact) == 1:
+        target = exact[0]
     else:
-        if not pending:
-            return "There are no upcoming reminders to cancel."
-        if not description.strip():
-            return "Error: pass a description of the reminder to cancel, or a reminder_id."
-        # Few reminders, so compare meanings on the fly (time included, for "the 3pm one")
+        # "the 5pm one": embeddings can't tell 5pm from 3pm, so narrow by the clock time first
+        candidates = pending
+        if times := mentioned_times(description):
+            at_time = [r for r in pending if any(
+                r["due_at"].astimezone(tz).hour == h and (m is None or r["due_at"].astimezone(tz).minute == m)
+                for h, m in times)]
+            candidates = at_time or pending
+        # Then compare meanings on the fly (there are only ever a few reminders)
         query = await embed(description, "query")
-        scored = sorted(
-            [(cosine_similarity(query, await embed(f"{r['text']} at {display(r['due_at'], tz)}", "document")), r)
-             for r in pending],
-            key=lambda pair: pair[0], reverse=True)
+        scored = sorted([(cosine_similarity(query, await embed(label(r, tz), "document")), r) for r in candidates],
+                        key=lambda pair: pair[0], reverse=True)
         best_score, target = scored[0]
         runner_up = scored[1][0] if len(scored) > 1 else 0.0
-        if best_score < CANCEL_CONFIDENT or best_score - runner_up < CANCEL_MARGIN:
-            listing = "\n".join(f"- {display(r['due_at'], tz)}: {r['text']} (reminder_id={r['_id']})"
-                                 for _, r in scored[:5])
+        # Exactly one reminder at the time they named ("my 10am one") identifies it on its own
+        unique_time_match = len(candidates) == 1 and candidates is not pending
+        if not unique_time_match and (best_score < CANCEL_CONFIDENT or best_score - runner_up < CANCEL_MARGIN):
+            listing = "\n".join(f"- {label(r, tz)}" for _, r in scored[:5])
             return ("Not sure which reminder is meant, so nothing was cancelled. Ask the user which one "
-                    f"(or whether none of these), then call cancel_reminder again with its exact text:\n{listing}")
+                    "(or whether none of these), then call cancel_reminder again with that line exactly, "
+                    f"e.g. \"{label(scored[0][1], tz)}\":\n{listing}")
     if not await db2.cancel_reminder(user_id, target["_id"]):
         return "Error: that reminder was already sent or cancelled."
-    return f"Cancelled: {display(target['due_at'], tz)}: {target['text']}"
+    return f"Cancelled: {label(target, tz)}"
 
 
 async def today_lines(user_id: str, now: datetime, tz: ZoneInfo) -> list[str]:
