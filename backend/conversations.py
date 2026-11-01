@@ -22,6 +22,7 @@ from models import ChatRequest, TitleUpdate
 import memory_writer
 import retrieval
 import titles
+import usertime
 from logs import get_logger
 import tools
 from auth import current_user
@@ -56,11 +57,12 @@ async def get_exchanges(conversation_id: str, user: dict = Depends(current_user)
     return await db2.list_exchanges(user["id"], conversation_id)
 
 def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memories: list[dict],
-                   user_text: str) -> list[dict]:
+                   user_text: str, tz: ZoneInfo | None = None) -> list[dict]:
+    """tz is the user's own timezone (usertime.py); defaults to USER_TIMEZONE."""
     system = SYSTEM_PROMPT
     if not LOCAL:
         system += "\n\n" + TOOLS_PROMPT
-    now = datetime.now(ZoneInfo(USER_TIMEZONE))
+    now = datetime.now(tz or ZoneInfo(USER_TIMEZONE))
     system += f"\n\nToday is {now:%A, %B %-d, %Y}. The user's local time is {now:%-I:%M %p %Z}."
     if all_facts:
         if facts:
@@ -115,9 +117,10 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
 
     log.debug("context: %d recent turns, %d facts (all=%s), %d past exchanges",
               len(recent), len(facts), all_facts, len(memories))
-    messages = build_messages(recent, facts, all_facts, memories, req.message)
+    tz = await usertime.user_zone(user_id)
+    messages = build_messages(recent, facts, all_facts, memories, req.message, tz)
 
-    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"])
+    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"], tz=tz)
 
     # Streams newline-delimited JSON events:
     #   {"type": "text", "text": ...}       a piece of the reply

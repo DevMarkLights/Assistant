@@ -17,6 +17,7 @@ users = database["users"]
 sessions = database["sessions"]
 push_subscriptions = database["push_subscriptions"]
 briefs = database["briefs"]
+reminders = database["reminders"]
 
 VECTOR_INDEX = "exchange_vector_index"
 FACT_VECTOR_INDEX = "fact_vector_index"
@@ -59,6 +60,8 @@ async def init_db():
     await exchanges.create_index([("user_text", "text"), ("assistant_text", "text")], name="exchange_text")
     await facts.create_index([("text", "text")], name="fact_text")
     await push_subscriptions.create_index("user_id")
+    await reminders.create_index([("status", ASCENDING), ("due_at", ASCENDING)])
+    await reminders.create_index([("user_id", ASCENDING), ("status", ASCENDING), ("due_at", ASCENDING)])
 
 async def close_db():
     await client.close()
@@ -280,6 +283,16 @@ async def create_session(token_hash: str, user_id: str, expires_at: datetime):
     await sessions.insert_one({"_id": token_hash, "user_id": user_id, "expires_at": expires_at})
 
 
+async def get_timezone_cache(user_id: str) -> tuple[str | None, str | None]:
+    """(timezone, the location it was looked up for) saved on the user, if any."""
+    doc = await users.find_one({"_id": user_id}, {"timezone": 1, "timezone_location": 1}) or {}
+    return doc.get("timezone"), doc.get("timezone_location")
+
+
+async def set_timezone_cache(user_id: str, timezone_name: str, location: str) -> None:
+    await users.update_one({"_id": user_id}, {"$set": {"timezone": timezone_name, "timezone_location": location}})
+
+
 async def get_brief_enabled(user_id: str) -> bool | None:
     """The user's own morning-brief setting, or None if they never changed it."""
     doc = await users.find_one({"_id": user_id}, {"brief_enabled": 1})
@@ -385,3 +398,41 @@ async def finish_brief(user_id: str, date: str, conversation_id: str) -> None:
 async def release_brief(user_id: str, date: str) -> None:
     """Drops a claim whose brief failed before anything was sent, so it can be retried."""
     await briefs.delete_one({"_id": f"{user_id}:{date}", "status": "creating"})
+
+
+# ---- reminders (due_at in UTC; status: pending -> sending -> sent, or cancelled) ----
+
+async def add_reminder(user_id: str, conversation_id: str, text: str, due_at: datetime) -> str:
+    doc = {"_id": uuid.uuid4().hex, "user_id": user_id, "conversation_id": conversation_id, "text": text,
+           "due_at": due_at, "status": "pending", "created_at": now()}
+    await reminders.insert_one(doc)
+    return doc["_id"]
+
+
+async def list_pending_reminders(user_id: str, until: datetime | None = None) -> list[dict]:
+    query = {"user_id": user_id, "status": "pending"}
+    if until:
+        query["due_at"] = {"$lte": until}
+    return [doc async for doc in reminders.find(query).sort("due_at", ASCENDING)]
+
+
+async def cancel_reminder(user_id: str, reminder_id: str) -> bool:
+    result = await reminders.update_one({"_id": reminder_id, "user_id": user_id, "status": "pending"},
+                                        {"$set": {"status": "cancelled", "cancelled_at": now()}})
+    return result.modified_count > 0
+
+
+async def claim_due_reminder(at: datetime) -> dict | None:
+    """Atomically moves one due reminder from pending to sending and returns it. Only one caller
+    can ever claim a given reminder, so it is sent at most once."""
+    return await reminders.find_one_and_update(
+        {"status": "pending", "due_at": {"$lte": at}},
+        {"$set": {"status": "sending", "claimed_at": now()}},
+        sort=[("due_at", ASCENDING)],
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def mark_reminder_sent(reminder_id: str, devices: int) -> None:
+    await reminders.update_one({"_id": reminder_id},
+                               {"$set": {"status": "sent", "sent_at": now(), "devices": devices}})

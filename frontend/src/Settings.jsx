@@ -27,11 +27,15 @@ export default function Settings({ api }) {
   const [briefMessage, setBriefMessage] = useState(null);
   const [briefAlreadySent, setBriefAlreadySent] = useState(false);
   const [briefEnabled, setBriefEnabled] = useState(null); // null while loading
+  const [briefInfo, setBriefInfo] = useState(null); // { time, timezone, location }
 
   useEffect(() => {
     api("/Assistant/api/brief/settings")
       .then((res) => res.json())
-      .then((body) => setBriefEnabled(body.enabled))
+      .then((body) => {
+        setBriefEnabled(body.enabled);
+        setBriefInfo(body);
+      })
       .catch((e) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -210,6 +214,15 @@ export default function Settings({ api }) {
               onChange={(e) => toggleBrief(e.target.checked)}
             />
           </label>
+          {briefInfo && (
+            <p className="settings-message">
+              Sent at {briefInfo.time} your time ({briefInfo.timezone}
+              {briefInfo.location
+                ? `, from your location "${briefInfo.location}"`
+                : ", the default. Tell the assistant where you live to use your own"}
+              ). Reminders use the same timezone.
+            </p>
+          )}
           <div className="settings-actions">
             <button className="primary" onClick={() => sendBrief()} disabled={busy}>
               Send morning brief now

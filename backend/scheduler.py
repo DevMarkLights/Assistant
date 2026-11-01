@@ -2,18 +2,17 @@
 # so each job runs once). Started from main.py's lifespan when SCHEDULER_ENABLED is true. Jobs must
 # never take the server down: each is wrapped so exceptions are logged and swallowed.
 import functools
-from datetime import timedelta
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 import brief
-from config import MORNING_BRIEF_TIME, SCHEDULER_ENABLED, USER_TIMEZONE
+import reminders
+from config import MORNING_BRIEF_TIME, SCHEDULER_ENABLED
 from logs import get_logger
 
 log = get_logger("scheduler")
-
-CATCH_UP = timedelta(hours=3)  # after a restart, still send today's brief if it's this late at most
 
 _scheduler: AsyncIOScheduler | None = None
 
@@ -28,34 +27,22 @@ def safe(job):
     return wrapper
 
 
-def brief_time() -> tuple[int, int]:
-    hour, minute = MORNING_BRIEF_TIME.split(":")
-    return int(hour), int(minute)
-
-
-def brief_is_due_for_catch_up(now) -> bool:
-    """True if now is past today's brief time but within CATCH_UP of it."""
-    hour, minute = brief_time()
-    scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return scheduled <= now <= scheduled + CATCH_UP
-
-
 def start() -> None:
     global _scheduler
     if not SCHEDULER_ENABLED:
         log.info("scheduler disabled (SCHEDULER_ENABLED=false)")
         return
-    hour, minute = brief_time()
-    _scheduler = AsyncIOScheduler(timezone=USER_TIMEZONE)
-    _scheduler.add_job(safe(brief.run_scheduled), CronTrigger(hour=hour, minute=minute, timezone=USER_TIMEZONE),
-                       id="morning_brief", misfire_grace_time=int(CATCH_UP.total_seconds()), coalesce=True)
-    # Restarted after the brief time (e.g. a deploy at 7:05)? Send today's now; claims prevent repeats
-    if brief_is_due_for_catch_up(brief.local_now()):
-        log.info("catching up on today's morning brief")
-        _scheduler.add_job(safe(brief.run_scheduled), id="morning_brief_catch_up")
+    _scheduler = AsyncIOScheduler(timezone="UTC")
+    # Users can be in different timezones, so instead of one 7:00 cron job, check every 5 minutes
+    # who is in their brief window. This also catches up after a restart; claims prevent repeats.
+    _scheduler.add_job(safe(brief.run_due), IntervalTrigger(minutes=5), id="morning_brief",
+                       max_instances=1, coalesce=True, next_run_time=datetime.now(timezone.utc))
+    # Due reminders, every minute. max_instances=1 so a slow run never overlaps the next
+    _scheduler.add_job(safe(reminders.send_due), IntervalTrigger(minutes=1), id="reminders",
+                       max_instances=1, coalesce=True)
     _scheduler.start()
-    log.info("scheduler started; morning brief daily at %s %s (next: %s)", MORNING_BRIEF_TIME, USER_TIMEZONE,
-             _scheduler.get_job("morning_brief").next_run_time)
+    log.info("scheduler started; morning briefs at %s in each user's timezone, reminders every minute",
+             MORNING_BRIEF_TIME)
 
 
 def stop() -> None:

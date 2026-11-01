@@ -12,9 +12,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import db2
 import homelab
 import memory_writer
+import reminders
 import weather
 import websearch
-from config import BRAVE_API_KEY, EMBED_MODEL, HOMELAB_USERS
+from config import BRAVE_API_KEY, EMBED_MODEL, HOMELAB_USERS, USER_TIMEZONE
 from embeddings import embed
 from logs import get_logger
 
@@ -38,6 +39,7 @@ class ToolContext:
     user_id: str
     conversation_id: str
     username: str = ""
+    tz: ZoneInfo = field(default_factory=lambda: ZoneInfo(USER_TIMEZONE))  # the user's own timezone
     calls: list[str] = field(default_factory=list)  # names of tools called this turn
 
 
@@ -144,7 +146,7 @@ def _summarize_forget(result: str) -> tuple[str, str]:
         "properties": {
             "timezone": {
                 "type": "string",
-                "description": "IANA timezone such as 'America/New_York'. Omit for the server's local time.",
+                "description": "IANA timezone such as 'America/New_York'. Omit for the user's own timezone.",
             },
         },
     },
@@ -153,10 +155,10 @@ def _summarize_forget(result: str) -> tuple[str, str]:
 )
 async def get_current_time(ctx: ToolContext, timezone: str | None = None) -> str:
     try:
-        now = datetime.now(ZoneInfo(timezone)) if timezone else datetime.now().astimezone()
+        zone = ZoneInfo(timezone) if timezone else ctx.tz
     except ZoneInfoNotFoundError:
         return f"Error: unknown timezone {timezone!r}. Use an IANA name like 'America/Chicago'."
-    return now.strftime("%A, %B %-d, %Y, %-I:%M %p ") + (timezone or now.tzname() or "local time")
+    return datetime.now(zone).strftime("%A, %B %-d, %Y, %-I:%M %p ") + str(zone)
 
 
 @registry.tool(
@@ -292,3 +294,70 @@ def _summarize_homelab(result: str) -> tuple[str, str]:
 )
 async def homelab_stats(ctx: ToolContext) -> str:
     return await homelab.report()
+
+
+def _summarize_cancel(result: str) -> tuple[str, str]:
+    if result.startswith("Cancelled:"):
+        return "Cancelled a reminder", result.removeprefix("Cancelled: ")
+    if result.startswith("Not sure"):
+        candidates = [line.split(" (reminder_id=")[0].removeprefix("- ") for line in result.splitlines()
+                      if line.startswith("- ")]
+        return "Asked which reminder to cancel", "\n".join(candidates)
+    return "No reminder cancelled", result
+
+
+@registry.tool(
+    description=(
+        "Set a reminder that is sent to the user's phone as a notification at the given time. Use when "
+        "the user asks to be reminded of something."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "What to remind them of, e.g. 'Stretch'."},
+            "due_at": {
+                "type": "string",
+                "description": "When, as ISO 8601 with the user's UTC offset, e.g. '2026-11-03T15:00:00-05:00'. "
+                               "Work it out from today's date and the user's local time in the system prompt.",
+            },
+        },
+        "required": ["text", "due_at"],
+    },
+    running="Setting a reminder",
+    summarize=lambda result: ("Reminder set", result.removeprefix("Reminder set for ")),
+)
+async def remind_me(ctx: ToolContext, text: str, due_at: str) -> str:
+    if not text.strip():
+        return "Error: text is empty"
+    return await reminders.create(ctx.user_id, ctx.conversation_id, text, due_at, ctx.tz)
+
+
+@registry.tool(
+    description="List the user's upcoming reminders.",
+    parameters={"type": "object", "properties": {}},
+    running="Checking your reminders",
+    summarize=lambda result: ("Checked your reminders", "\n".join(
+        line.split(" (reminder_id=")[0].removeprefix("- ") for line in result.splitlines())),
+)
+async def list_reminders(ctx: ToolContext) -> str:
+    return await reminders.upcoming_lines(ctx.user_id, ctx.tz)
+
+
+@registry.tool(
+    description=(
+        "Cancel one of the user's upcoming reminders. Pass a description; it's cancelled only if one "
+        "reminder clearly matches. Otherwise you get candidates back: ask the user which one, then call "
+        "again with that reminder's exact text (or its reminder_id in the same turn)."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "description": {"type": "string", "description": "Which reminder, e.g. 'the dentist one'."},
+            "reminder_id": {"type": "string", "description": "Exact id from list_reminders or a previous call."},
+        },
+    },
+    running="Cancelling a reminder",
+    summarize=_summarize_cancel,
+)
+async def cancel_reminder(ctx: ToolContext, description: str = "", reminder_id: str | None = None) -> str:
+    return await reminders.cancel(ctx.user_id, ctx.tz, description, reminder_id)

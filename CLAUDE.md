@@ -65,17 +65,28 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 **Scheduler** (`scheduler.py`): APScheduler (3.x) runs inside the FastAPI process, started and stopped in `main.py`'s lifespan. Production has one uvicorn worker (`deploy.sh`), so each job runs once.
 - **`SCHEDULER_ENABLED`:** must be `false` on any other server that shares the database (the Mac). Claims in the database prevent duplicate sends anyway.
 - **Errors:** every job is wrapped in `safe()`, so it can't crash the server.
-- **Time zones:** times are stored in UTC; `USER_TIMEZONE` is used for scheduling, prompts and display. The chat prompt's date comes from it too.
+- **Jobs:** the morning brief job runs **every 5 minutes**, rather than as one cron at 7:00, because users can be in different timezones. Reminders run every minute.
+- **Per-user timezones** (`usertime.py`): times are stored in UTC, and each user's timezone is used for scheduling, prompts and display.
+  - **Source:** the timezone comes from the user's "lives in …" fact, through Open-Meteo's geocoder (`weather.lookup` returns a `timezone`). It's cached on the user document as `timezone` and `timezone_location`, and looked up again only when the location changes.
+  - **Fallback:** with no location it's `USER_TIMEZONE`. If the lookup fails, the last cached timezone is kept.
+  - **Where it's used:** `chat` resolves it once per message for `build_messages` and `ToolContext.tz`. The time tool and the reminder tools use `ctx.tz`.
 
 **Morning brief** (`brief.py`):
-- **When and who:** a daily job at `MORNING_BRIEF_TIME` (local time) for every user whose brief is on. Each user has a switch in Settings (`GET/PUT /Assistant/api/brief/settings`), stored as `brief_enabled` on the user document. Users who never touched it are on only if they're listed in `BRIEF_USERS`; `db2.brief_recipients` applies that rule.
-- **What it gathers:** the date; the weather for the user's own "lives in …" fact, or else the city in `USER_TIMEZONE` (`America/New_York` gives New York); a summary of Pi health, **only for `HOMELAB_USERS`**, because server details are private to the owner and checked server-side in `gather()`; and today's reminders via `reminders_today()`, a hook that Stage 3 fills in. Each part can fail on its own without stopping the rest.
+- **When and who:** at `MORNING_BRIEF_TIME` in **each user's own timezone**, for every user whose brief is on. `run_due` sends to anyone inside their window (the brief time plus `CATCH_UP`, 3 hours) who doesn't have today's brief yet, which also covers restarts. Each user has a switch in Settings (`GET/PUT /Assistant/api/brief/settings`), stored as `brief_enabled` on the user document. Users who never touched it are on only if they're listed in `BRIEF_USERS`; `db2.brief_recipients` applies that rule.
+- **What it gathers:** the date, in the user's timezone; the weather for the user's own "lives in …" fact, or else the city in `USER_TIMEZONE` (`usertime.default_location()`; `America/New_York` gives New York); a summary of Pi health, **only for `HOMELAB_USERS`**, because server details are private to the owner and checked server-side in `gather()`; and today's reminders via `reminders_today()`, a hook that Stage 3 fills in. Each part can fail on its own without stopping the rest.
 - **Writing it:** `MEMORY_MODEL` writes `{brief, summary}`. If the model fails, `_fallback()` builds a plain brief instead.
 - **Saving it:** it's saved as a "Morning brief, <Mon D>" conversation containing one assistant-only exchange: `user_text=""`, no embedding, `embed_model="none"`, so it never appears in retrieval. Then a push is sent with `url=/Assistant/?c=<id>`, which `Chat.jsx` opens.
 - **Once per day:** `db2.claim_brief` inserts a `briefs` document whose `_id` is `<user_id>:<YYYY-MM-DD>`. A failure *before* sending releases the claim so the brief can be retried; after the conversation is saved it counts as sent, so it's never sent twice.
-- **Catch-up:** if the server starts within `CATCH_UP` (3 hours) after the brief time, it sends today's brief then.
 - **Manual trigger:** `POST /Assistant/api/brief/run` (with `?force=true` for testing) creates the brief now. Settings has a button for it.
 - **Assistant-only exchanges:** the frontend hides the empty user bubble, and `build_messages` skips empty user turns.
+
+**Reminders** (`reminders.py`, tools in `tools.py`):
+- **Storage:** the `reminders` collection holds `text`, `due_at` (UTC), `status` (`pending` → `sending` → `sent`, or `cancelled`), `conversation_id`, `user_id` and `created_at`.
+- **`remind_me(text, due_at)`:** the model converts "tomorrow at 3pm" into ISO 8601 using the date and local time in the system prompt. A time without an offset is taken as the user's own timezone, and times are shown in it. Past or unparseable times come back as `Error:` strings.
+- **`list_reminders`:** lists pending reminders.
+- **`cancel_reminder`:** works like `forget`. It compares meaning on the fly, by embedding each pending reminder with its time, cancels only when the best match is at least 0.6 and leads the next by 0.1, and otherwise returns candidates for the model to ask about.
+- **Sending:** the scheduler's job runs every minute (`reminders.send_due`). It claims due reminders one at a time with `find_one_and_update` (pending → sending), so concurrent jobs, or a second server, can never send one twice. Each push links to the chat the reminder was set in. A reminder that fails mid-send stays in `sending` and is not retried: missing one is better than sending it twice.
+- **Morning brief:** includes the pending reminders due for the rest of the day, via `brief.reminders_today`.
 
 **Retrieval** (`retrieval.py`): chat context and `/memory/search` use hybrid search.
 - **Merge:** vector results (`$vectorSearch`) and keyword results (MongoDB `$text` on the `exchange_text` and `fact_text` indexes, created in `init_db`) are merged by id.

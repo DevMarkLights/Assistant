@@ -1,8 +1,8 @@
 # Morning brief: once a day, gather the date, weather, Pi health, and today's reminders, have the
 # background model write a short brief, save it as a new conversation, and push a one-line summary
-# that opens it. One brief per user per local date (db2.claim_brief), even across restarts.
-import re
-from datetime import datetime
+# that opens it. Each user gets it at MORNING_BRIEF_TIME in their own timezone (usertime.py), and
+# at most one per local date (db2.claim_brief), even across restarts.
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
@@ -11,9 +11,11 @@ from pydantic import BaseModel
 import db2
 import homelab
 import push
+import reminders
+import usertime
 import weather
 from auth import current_user
-from config import BRIEF_USERS, HOMELAB_USERS, MEMORY_MODEL, USER_TIMEZONE
+from config import BRIEF_USERS, HOMELAB_USERS, MEMORY_MODEL, MORNING_BRIEF_TIME
 from llm import complete_json
 from logs import get_logger
 
@@ -27,29 +29,28 @@ need an umbrella or a jacket), anything wrong with their home server, and today'
 invent anything that isn't in the notes; leave out a section with nothing in it.
 Respond with JSON only: {"brief": "<the brief>", "summary": "<one line under 90 characters for a phone notification>"}"""
 
-LIVES_IN = re.compile(r"lives in (.+?)\.?$", re.IGNORECASE)
+CATCH_UP = timedelta(hours=3)  # a brief that's due but missed (server down at 7:00) still goes out until then
 
 
-def local_now() -> datetime:
-    return datetime.now(ZoneInfo(USER_TIMEZONE))
+def brief_time() -> tuple[int, int]:
+    hour, minute = MORNING_BRIEF_TIME.split(":")
+    return int(hour), int(minute)
 
 
-async def reminders_today(user_id: str, now: datetime) -> list[str]:
-    """Reminders due today, as display lines. Filled in by Stage 3 (reminders)."""
-    return []
+def in_brief_window(now: datetime) -> bool:
+    """True if `now` (in the user's timezone) is past their brief time today, but within CATCH_UP of it."""
+    hour, minute = brief_time()
+    scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return scheduled <= now <= scheduled + CATCH_UP
 
 
-def default_location() -> str:
-    """The city in USER_TIMEZONE, e.g. "America/New_York" -> "New York"."""
-    return USER_TIMEZONE.rsplit("/", 1)[-1].replace("_", " ")
-
-
-async def _location(user_id: str) -> str:
-    """The user's own "lives in ..." fact, or else the city of USER_TIMEZONE."""
-    for fact in await db2.list_facts(user_id):
-        if match := LIVES_IN.search(fact["text"]):
-            return match.group(1)
-    return default_location()
+async def reminders_today(user_id: str, now: datetime, tz: ZoneInfo) -> list[str]:
+    """Pending reminders due today, as display lines like "3:00 PM: dentist"."""
+    try:
+        return await reminders.today_lines(user_id, now, tz)
+    except Exception:
+        log.warning("brief reminders failed", exc_info=True)
+        return []
 
 
 async def _pi_health() -> str:
@@ -63,9 +64,10 @@ async def _pi_health() -> str:
 
 
 async def gather(user: dict, now: datetime) -> dict:
-    """Everything the brief needs, as short notes. Each part fails on its own without stopping the rest."""
+    """Everything the brief needs, as short notes; `now` is in the user's timezone. Each part fails
+    on its own without stopping the rest."""
     notes = {"date": now.strftime("%A, %B %-d, %Y")}
-    location = await _location(user["id"])
+    location = await usertime.user_location(user["id"]) or usertime.default_location()
     try:
         notes["weather"] = await weather.forecast(location, days=1)
     except Exception:
@@ -79,7 +81,7 @@ async def gather(user: dict, now: datetime) -> dict:
         except Exception:
             log.warning("brief Pi health failed", exc_info=True)
             notes["home_server"] = "Couldn't check the home server."
-    notes["reminders"] = await reminders_today(user["id"], now)
+    notes["reminders"] = await reminders_today(user["id"], now, now.tzinfo)
     return notes
 
 
@@ -115,8 +117,8 @@ async def write(notes: dict) -> dict:
 
 async def run_for_user(user: dict, force: bool = False) -> dict:
     """Creates and pushes today's brief. Returns {"status", "conversation_id"}; never raises."""
-    now = local_now()
-    date = now.strftime("%Y-%m-%d")
+    now = datetime.now(await usertime.user_zone(user["id"]))
+    date = now.strftime("%Y-%m-%d")  # the user's local date
     if not await db2.claim_brief(user["id"], date):
         existing = await db2.get_brief(user["id"], date) or {}
         if not force:
@@ -144,8 +146,9 @@ async def is_enabled(user: dict) -> bool:
     return setting if setting is not None else user["username"].lower() in BRIEF_USERS
 
 
-async def run_scheduled() -> None:
-    """The daily job: briefs for everyone who has them switched on. Never raises."""
+async def run_due() -> None:
+    """Runs every few minutes: sends the brief to each user whose local time is in their brief
+    window and who hasn't had today's yet. Never raises."""
     try:
         recipients = await db2.brief_recipients(BRIEF_USERS)
     except Exception:
@@ -153,7 +156,9 @@ async def run_scheduled() -> None:
         return
     for user in recipients:
         try:
-            await run_for_user(user)
+            now = datetime.now(await usertime.user_zone(user["id"]))
+            if in_brief_window(now) and not await db2.get_brief(user["id"], now.strftime("%Y-%m-%d")):
+                await run_for_user(user)
         except Exception:
             log.exception("scheduled brief for %s failed", user["username"])
 
@@ -164,7 +169,12 @@ class BriefSettings(BaseModel):
 
 @router.get("/settings")
 async def get_settings(user: dict = Depends(current_user)):
-    return {"enabled": await is_enabled(user)}
+    return {
+        "enabled": await is_enabled(user),
+        "time": MORNING_BRIEF_TIME,
+        "timezone": await usertime.user_timezone(user["id"]),
+        "location": await usertime.user_location(user["id"]),
+    }
 
 
 @router.put("/settings")

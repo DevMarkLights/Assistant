@@ -56,6 +56,12 @@ async def _geocode(client: httpx.AsyncClient, location: str) -> dict | None:
     return results[0] if results else None
 
 
+async def lookup(location: str) -> dict | None:
+    """Geocodes a place name; the result includes "timezone" (e.g. "America/Chicago")."""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        return await _geocode(client, location)
+
+
 def _place_name(geo: dict) -> str:
     return ", ".join(p for p in (geo.get("name"), geo.get("admin1"), geo.get("country_code")) if p)
 
