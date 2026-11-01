@@ -13,6 +13,13 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "6"))
+# Every chat request re-sends recent history, and Groq's free tier allows 8K tokens a minute, so
+# history is capped: about HISTORY_TOKENS in total (~4 characters per token), the latest reply
+# kept up to LATEST_REPLY_CHARS, older replies trimmed to OLDER_REPLY_CHARS
+HISTORY_TOKENS = int(os.getenv("HISTORY_TOKENS", "1500"))
+LATEST_REPLY_CHARS = int(os.getenv("LATEST_REPLY_CHARS", "4000"))
+OLDER_REPLY_CHARS = int(os.getenv("OLDER_REPLY_CHARS", "800"))
+EXCERPT_CHARS = 300  # each side of a past-conversation excerpt
 # How long Ollama keeps the embedding model loaded after a call: -1 = always (the default here),
 # or a duration like "24h". Ollama's own default of 5 minutes means slow reloads on the Pi.
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "-1")
@@ -83,17 +90,9 @@ source. Trust things the user stated directly over earlier assistant replies.
 Never invent memories that are not shown to you."""
 
 # Appended to SYSTEM_PROMPT when tools are available (Groq path)
-TOOLS_PROMPT = """You have tools. Use one only when the user's message needs it; answer
-everything else directly. Today's date and the server time are given below, so don't call a tool
-for the date or the local time.
-- Weather: if the user doesn't say where, use their location from the known facts; if you don't
-  know it, ask.
-- Web search: for current events or facts you aren't sure of. Mention the sources briefly.
-- remember: only when the user explicitly asks you to remember something about them.
-- forget: only when the user asks you to forget something. If it returns candidates instead of
-  deleting, ask the user which one they mean; never guess.
-- remind_me: turn phrases like "tomorrow at 3pm" or "in 2 minutes" into an exact ISO 8601 time
-  with the user's UTC offset, using today's date and the user's local time below. If the time is
-  unclear (e.g. no time of day), ask. cancel_reminder works like forget: if unsure, ask.
-When you call a tool, write your reply only after you see its result, not before. After remember
-or forget, briefly tell the user what changed in their memory."""
+TOOLS_PROMPT = """Use a tool only when the message needs it; otherwise answer directly. The date
+and the user's local time are below, so they never need a tool. Weather with no place given: use
+the user's location from the facts, or ask. Only remember, forget, or cancel a reminder when asked;
+if forget or cancel_reminder returns candidates, ask which one, never guess. remind_me: in_minutes
+for relative times, due_at for specific ones; ask if the time is unclear. Mention sources after a
+web search. Reply only after a tool's result arrives; after remember or forget, say what changed."""

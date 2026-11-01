@@ -65,7 +65,7 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 **Scheduler** (`scheduler.py`): APScheduler (3.x) runs inside the FastAPI process, started and stopped in `main.py`'s lifespan. Production has one uvicorn worker (`deploy.sh`), so each job runs once.
 - **`SCHEDULER_ENABLED`:** must be `false` on any other server that shares the database (the Mac). Claims in the database prevent duplicate sends anyway.
 - **Errors:** every job is wrapped in `safe()`, so it can't crash the server.
-- **Jobs:** the morning brief job runs **every 5 minutes**, rather than as one cron at 7:00, because users can be in different timezones. Reminders run every minute.
+- **Jobs:** the morning brief job runs **every 5 minutes**, rather than as one cron at 7:00, because users can be in different timezones. Reminders are checked every 10 seconds.
 - **Per-user timezones** (`usertime.py`): times are stored in UTC, and each user's timezone is used for scheduling, prompts and display.
   - **Source:** the timezone comes from the user's "lives in …" fact, through Open-Meteo's geocoder (`weather.lookup` returns a `timezone`). It's cached on the user document as `timezone` and `timezone_location`, and looked up again only when the location changes.
   - **Fallback:** with no location it's `USER_TIMEZONE`. If the lookup fails, the last cached timezone is kept.
@@ -82,16 +82,18 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 
 **Reminders** (`reminders.py`, tools in `tools.py`):
 - **Storage:** the `reminders` collection holds `text`, `due_at` (UTC), `status` (`pending` → `sending` → `sent`, or `cancelled`), `conversation_id`, `user_id` and `created_at`.
-- **`remind_me(text, due_at)`:** the model converts "tomorrow at 3pm" into ISO 8601 using the date and local time in the system prompt. A time without an offset is taken as the user's own timezone, and times are shown in it. Past or unparseable times come back as `Error:` strings.
+- **`remind_me(text, in_minutes | due_at)`:**
+  - **Relative times** ("in 2 minutes") use `in_minutes`, and the server adds that to the exact current time. The prompt only gives the time to the minute, so the model rounded when it did that arithmetic itself.
+  - **Specific times** ("tomorrow at 3pm") use `due_at` in ISO 8601, worked out from the date in the system prompt. A time without an offset is taken as the user's own timezone, and times are shown in it. Past or unparseable times come back as `Error:` strings.
 - **`list_reminders`:** lists pending reminders.
 - **No ids reach the model:** `list_reminders` and the cancel candidates show reminders as "Stretch at Mon Nov 2, 3:00 PM" (`reminders.label`), never by id, because the model repeats whatever it sees.
 - **`cancel_reminder(description)`** cancels:
   1. an exact label match;
-  2. otherwise, if the request names a clock time ("5pm", "5:30 pm", "17:00"; a bare hour needs am or pm), the candidates are narrowed to reminders at that time, and **exactly one** match is cancelled on the strength of the time alone;
+  2. otherwise, if the request names a clock time ("5pm", "5:30 pm", "17:00"; a bare hour needs am or pm), the candidates are narrowed to reminders at that time, and **exactly one** match is cancelled on the strength of the time alone. **If no pending reminder is at that time, nothing is cancelled** (it may already have been sent), and it never falls back to another reminder;
   3. otherwise the best meaning match, provided it's at least 0.6 and leads the next by 0.1.
 
   If none of those apply, it returns candidate labels for the model to ask about.
-- **Sending:** the scheduler's job runs every minute (`reminders.send_due`). It claims due reminders one at a time with `find_one_and_update` (pending → sending), so concurrent jobs, or a second server, can never send one twice. Each push links to the chat the reminder was set in. A reminder that fails mid-send stays in `sending` and is not retried: missing one is better than sending it twice.
+- **Sending:** the scheduler's job runs **every 10 seconds** (`reminders.send_due`, one indexed query per check), so a reminder is at most about 10 seconds late. With the earlier once-a-minute job they arrived up to 59 seconds late. It claims due reminders one at a time with `find_one_and_update` (pending → sending), so concurrent jobs, or a second server, can never send one twice. Each push links to the chat the reminder was set in. A reminder that fails mid-send stays in `sending` and is not retried: missing one is better than sending it twice.
 - **Morning brief:** includes the pending reminders due for the rest of the day, via `brief.reminders_today`.
 
 **Retrieval** (`retrieval.py`): chat context and `/memory/search` use hybrid search.
@@ -107,6 +109,11 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 
 **Speed** (the Pi is slow, so these matter):
 - **Embeddings:** `embeddings.py` sends `keep_alive` (`OLLAMA_KEEP_ALIVE`, default `-1`, meaning forever) with every Ollama call, and `main.py` warms the model up at startup. Ollama's own default unloads the model after 5 idle minutes, and reloading it on the Pi's 4 cores cost seconds per message. One shared `httpx` client reuses connections.
+- **Token budget:** the free tier allows 8K tokens a minute, and a tool reply needs two requests, so every request is kept small.
+  - **History:** `fit_history` caps it at `HISTORY_TOKENS` (1500). The latest reply is kept up to `LATEST_REPLY_CHARS`, older replies are cut to `OLDER_REPLY_CHARS`, and past-conversation excerpts to `EXCERPT_CHARS`.
+  - **Tool text:** tool descriptions and `TOOLS_PROMPT` are kept terse, because they're sent with every request.
+  - **Result:** in testing, the worst-case request went from about 7,400 tokens to about 2,450.
+- **No silent retries on chat:** chat calls use `llm.chat_client` (`max_retries=0`). The SDK's own retry waits for Groq's retry-after on a 429, up to a minute, which produced 65-second replies. The tool loop handles errors itself instead: a rate limit moves to the next model in `CHAT_MODELS`, and a `TRANSIENT` (connection or 5xx) error is retried once after 1 second. Background calls keep the SDK's two retries.
 - **Reasoning:** `llm.model_options` sends `reasoning_effort` (`REASONING_EFFORT`, default `low`) to gpt-oss models on every call, chat and background alike. Hidden reasoning delays the first visible word and uses tokens.
 - **Parallel setup:** `chat` runs its lookups in two `asyncio.gather` waves (about 60–100 ms instead of about 300 ms in testing). First the conversation, history, query embedding and facts; then memory search, the timezone (reusing the facts already loaded) and fact search. `recall_*` runs its vector and keyword searches concurrently too.
 - **Background save:** the stream closes as soon as the reply (and any title) is done. Embedding and saving the exchange, then memory extraction, happen afterwards in `_save_exchange` via `_spawn`, so the send box unlocks right away. A failed save is logged.
@@ -136,7 +143,7 @@ Memory changes and failures are logged under `assistant.memory`.
 - **Starter tools:**
   - `get_current_time` gives the time, in a timezone if one is passed.
   - `remember` reuses `memory_writer.reconcile`, which returns what it did ("Saved", "Updated", "Already known", and so on).
-  - `forget` deletes only when the best vector match is at least `FORGET_CONFIDENT` and leads the runner-up by `FORGET_MARGIN`. Otherwise it returns candidates for the model to ask about. The thresholds were measured with nomic-embed-text; the gap matters more than the absolute score.
+  - `forget(description)` deletes an exact text match, or the best vector match if it's at least `FORGET_CONFIDENT` and leads the runner-up by `FORGET_MARGIN`. Otherwise it returns candidate texts, with no ids, for the model to ask about. The thresholds were measured with nomic-embed-text; the gap matters more than the absolute score.
 - **Read-only tools:** each tool's logic lives in its own module, registered in `tools.py`.
   - `get_weather` (`weather.py`) uses Open-Meteo, with no key. Geocoding matches the name only, so "Chicago, IL" is split and the qualifier, including US state codes, picks the result.
   - `web_search` (`websearch.py`) uses the Brave Search API and is only offered when `BRAVE_API_KEY` is set. It returns the top 5 results, with Brave's `<strong>` tags stripped. Groq's built-in search was tried and rejected: its answers were inconsistent and its `compound` models aren't available on this account. DuckDuckGo has no official web-results API.

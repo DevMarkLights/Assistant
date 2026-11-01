@@ -138,21 +138,16 @@ def _summarize_forget(result: str) -> tuple[str, str]:
         return "Forgot", _after("Forgot:", result)
     if result.startswith("Not sure"):
         # Show the candidate facts, not the instructions and ids meant for the model
-        candidates = [line.split(": ", 1)[-1] for line in result.splitlines() if line.startswith("- ")]
+        candidates = [line.removeprefix("- ") for line in result.splitlines() if line.startswith("- ")]
         return "Asked which memory to forget", "\n".join(candidates)
     return "Nothing matched to forget", result
 
 
 @registry.tool(
-    description="Get the current date and time. Use when the user asks what time or day it is.",
+    description="Current date and time, e.g. in another timezone (the user's own is in the prompt).",
     parameters={
         "type": "object",
-        "properties": {
-            "timezone": {
-                "type": "string",
-                "description": "IANA timezone such as 'America/New_York'. Omit for the user's own timezone.",
-            },
-        },
+        "properties": {"timezone": {"type": "string", "description": "IANA name, e.g. 'Europe/London'."}},
     },
     running="Checking the time",
     summarize=lambda result: ("Checked the time", result),
@@ -166,21 +161,12 @@ async def get_current_time(ctx: ToolContext, timezone: str | None = None) -> str
 
 
 @registry.tool(
-    description=(
-        "Save a lasting fact about the user to long-term memory. Use only when the user explicitly "
-        "asks you to remember something. Merges with or skips facts that are already stored."
-    ),
+    description="Save a lasting fact about the user (only when asked). Merges with or skips existing facts.",
     parameters={
         "type": "object",
         "properties": {
-            "fact": {
-                "type": "string",
-                "description": "One short third-person sentence, e.g. 'The user has a dog named Max.'",
-            },
-            "category": {
-                "type": "string",
-                "enum": ["personal", "work", "preference", "project", "goal", "other"],
-            },
+            "fact": {"type": "string", "description": "Short third-person sentence, e.g. 'The user has a dog named Max.'"},
+            "category": {"type": "string", "enum": ["personal", "work", "preference", "project", "goal", "other"]},
         },
         "required": ["fact"],
     },
@@ -196,60 +182,46 @@ async def remember(ctx: ToolContext, fact: str, category: str = "other") -> str:
 
 
 @registry.tool(
-    description=(
-        "Delete a stored fact about the user. Use only when the user asks you to forget something. "
-        "Pass a description of the fact; it is deleted only if one stored fact clearly matches. "
-        "Otherwise you get candidates back: ask the user which one they mean, then call again "
-        "with that fact's exact text as the description (or its fact_id in the same turn)."
-    ),
+    description=("Delete a stored fact (only when asked). Deletes only a clear match; otherwise returns "
+                 "candidates to ask about, then call again with the chosen fact's exact text."),
     parameters={
         "type": "object",
-        "properties": {
-            "description": {"type": "string", "description": "What to forget, e.g. 'my dog's name'."},
-            "fact_id": {"type": "string", "description": "Exact id of a candidate from a previous forget call."},
-        },
+        "properties": {"description": {"type": "string", "description": "What to forget, e.g. 'my dog's name'."}},
+        "required": ["description"],
     },
     running="Looking for the memory to forget",
     summarize=_summarize_forget,
 )
-async def forget(ctx: ToolContext, description: str = "", fact_id: str | None = None) -> str:
-    if fact_id:
-        fact = await db2.get_fact(ctx.user_id, fact_id)
-        if not fact:
-            return f"Error: no stored fact with id {fact_id!r}. Nothing was deleted."
-        await db2.delete_fact(ctx.user_id, fact_id)
-        return f"Forgot: {fact['text']}"
-
+async def forget(ctx: ToolContext, description: str) -> str:
     if not description.strip():
-        return "Error: pass a description of the fact to forget, or a fact_id."
+        return "Error: describe the fact to forget."
     vec = await embed(description, "query")
     matches = await db2.search_facts(ctx.user_id, vec, EMBED_MODEL, FORGET_CANDIDATES, FORGET_CANDIDATE_MIN)
     if not matches:
         return f"No stored fact matches {description!r}. Nothing was deleted."
 
-    best = matches[0]
+    # The follow-up after a "which one?" passes a candidate's exact text
+    exact = [m for m in matches if m["text"].strip().lower() == description.strip().lower()]
+    best = exact[0] if exact else matches[0]
     runner_up = matches[1]["score"] if len(matches) > 1 else 0.0
-    if best["score"] >= FORGET_CONFIDENT and best["score"] - runner_up >= FORGET_MARGIN:
+    if exact or (best["score"] >= FORGET_CONFIDENT and best["score"] - runner_up >= FORGET_MARGIN):
         await db2.delete_fact(ctx.user_id, best["id"])
         return f"Forgot: {best['text']}"
 
-    listing = "\n".join(f"- fact_id={m['id']}: {m['text']}" for m in matches)
+    # No ids in the listing: whatever the model sees, it may repeat to the user
+    listing = "\n".join(f"- {m['text']}" for m in matches)
     return ("Not sure which fact is meant, so nothing was deleted. Ask the user which one to forget "
-            "(or whether none of these), then call forget again with that fact's exact text "
-            f"as the description:\n{listing}")
+            f"(or whether none of these), then call forget again with that fact's exact text:\n{listing}")
 
 
 @registry.tool(
-    description=(
-        "Get current weather and a daily forecast (temperature, conditions, chance of precipitation, "
-        "wind) for a place. Use for questions like 'do I need an umbrella tomorrow?'."
-    ),
+    description="Current weather and daily forecast: temperature, conditions, rain chance, wind.",
     parameters={
         "type": "object",
         "properties": {
-            "location": {"type": "string", "description": "City, optionally with state or country, e.g. 'Chicago, IL'."},
-            "days": {"type": "integer", "minimum": 1, "maximum": 7, "description": "Days of forecast, starting today. Default 3."},
-            "units": {"type": "string", "enum": ["imperial", "metric"], "description": "Default imperial (°F, mph)."},
+            "location": {"type": "string", "description": "City, e.g. 'Chicago, IL'."},
+            "days": {"type": "integer", "minimum": 1, "maximum": 7, "description": "Default 3."},
+            "units": {"type": "string", "enum": ["imperial", "metric"]},
         },
         "required": ["location"],
     },
@@ -261,15 +233,8 @@ async def get_weather(ctx: ToolContext, location: str, days: int = 3, units: str
 
 
 @registry.tool(
-    description=(
-        "Search the web for current information: news, recent events, prices, release versions, "
-        "or facts you're unsure of. Returns the top results with titles, URLs, and snippets."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {"query": {"type": "string", "description": "What to search for."}},
-        "required": ["query"],
-    },
+    description="Search the web for current information. Returns top results with URLs.",
+    parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     running="Searching the web",
     summarize=lambda result: ("Searched the web", result),
     available=lambda ctx: bool(BRAVE_API_KEY),
@@ -287,10 +252,7 @@ def _summarize_homelab(result: str) -> tuple[str, str]:
 
 
 @registry.tool(
-    description=(
-        "Check the health of the user's home server (the Raspberry Pi this assistant runs on): CPU "
-        "temperature, load, memory, disk space, power/throttling, and whether its services are running."
-    ),
+    description="Health of the user's Raspberry Pi home server: temperature, load, memory, disks, power, services.",
     parameters={"type": "object", "properties": {}},
     running="Checking the Pi",
     summarize=_summarize_homelab,
@@ -310,29 +272,23 @@ def _summarize_cancel(result: str) -> tuple[str, str]:
 
 
 @registry.tool(
-    description=(
-        "Set a reminder that is sent to the user's phone as a notification at the given time. Use when "
-        "the user asks to be reminded of something."
-    ),
+    description="Send the user a reminder notification at a time.",
     parameters={
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "What to remind them of, e.g. 'Stretch'."},
-            "due_at": {
-                "type": "string",
-                "description": "When, as ISO 8601 with the user's UTC offset, e.g. '2026-11-03T15:00:00-05:00'. "
-                               "Work it out from today's date and the user's local time in the system prompt.",
-            },
+            "text": {"type": "string", "description": "e.g. 'Stretch'."},
+            "in_minutes": {"type": "number", "description": "Relative times: minutes from now ('in an hour' = 60)."},
+            "due_at": {"type": "string", "description": "Specific times: ISO 8601 with offset, e.g. '2026-11-03T15:00:00-05:00'."},
         },
-        "required": ["text", "due_at"],
+        "required": ["text"],
     },
     running="Setting a reminder",
     summarize=lambda result: ("Reminder set", result.removeprefix("Reminder set for ")),
 )
-async def remind_me(ctx: ToolContext, text: str, due_at: str) -> str:
+async def remind_me(ctx: ToolContext, text: str, due_at: str | None = None, in_minutes: float | None = None) -> str:
     if not text.strip():
         return "Error: text is empty"
-    return await reminders.create(ctx.user_id, ctx.conversation_id, text, due_at, ctx.tz)
+    return await reminders.create(ctx.user_id, ctx.conversation_id, text, ctx.tz, due_at, in_minutes)
 
 
 @registry.tool(
@@ -347,16 +303,11 @@ async def list_reminders(ctx: ToolContext) -> str:
 
 
 @registry.tool(
-    description=(
-        "Cancel one of the user's upcoming reminders. Pass a description, including the time if it "
-        "helps (e.g. 'the 3pm stretch reminder'); it's cancelled only if one reminder clearly matches. "
-        "Otherwise you get candidates back: ask the user which one, then call again with that line exactly."
-    ),
+    description=("Cancel an upcoming reminder. Cancels only a clear match (include its time if known); "
+                 "otherwise returns candidates to ask about, then call again with the chosen line."),
     parameters={
         "type": "object",
-        "properties": {
-            "description": {"type": "string", "description": "Which reminder, e.g. 'the dentist one'."},
-        },
+        "properties": {"description": {"type": "string", "description": "e.g. 'the 3pm stretch reminder'."}},
         "required": ["description"],
     },
     running="Cancelling a reminder",

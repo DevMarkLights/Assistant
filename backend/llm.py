@@ -1,8 +1,9 @@
 # Streaming LLM client that routes to Ollama (local) or Groq (cloud) based on the LOCAL config flag.
 # The Groq path can also run a tool-calling loop; Ollama is plain chat. Chat falls back to
 # GROQ_FALLBACK_MODELS when GROQ_MODEL is rate-limited, and every Groq request logs its token usage.
+import asyncio
 import json
-from groq import APIError, AsyncGroq, RateLimitError
+from groq import APIConnectionError, APIError, AsyncGroq, InternalServerError, RateLimitError
 
 import httpx
 
@@ -19,6 +20,12 @@ if not LOCAL:
     if not GROQ_API_KEY:
         raise RuntimeError("LOCAL=false requires GROQ_API_KEY in .env")
     groq_client = AsyncGroq(api_key=GROQ_API_KEY, timeout=TIMEOUT, max_retries=2)
+
+# Chat requests must not use the SDK's automatic retries: on a rate limit it quietly waits for
+# Groq's retry-after (up to a minute) before trying again, which looked like a 65-second reply.
+# The chat loop handles errors itself instead: rate limit -> next model, server error -> one retry.
+chat_client = groq_client.with_options(max_retries=0) if groq_client else None
+TRANSIENT = (APIConnectionError, InternalServerError)
 
 CHAT_MODELS = [GROQ_MODEL, *GROQ_FALLBACK_MODELS]
 
@@ -84,8 +91,13 @@ async def _groq_stream(messages: list[dict]):
 
     for i, model in enumerate(CHAT_MODELS):
         try:
-            stream = await groq_client.chat.completions.create(model=model, messages=messages, stream=True,
-                                                               **model_options(model))
+            try:
+                stream = await chat_client.chat.completions.create(model=model, messages=messages, stream=True,
+                                                                   **model_options(model))
+            except TRANSIENT:
+                await asyncio.sleep(1)
+                stream = await chat_client.chat.completions.create(model=model, messages=messages, stream=True,
+                                                                   **model_options(model))
             break
         except RateLimitError:
             if i + 1 == len(CHAT_MODELS):
@@ -115,14 +127,14 @@ async def _groq_tool_loop(messages: list[dict], registry, ctx):
 
 
 async def _tool_rounds(messages: list[dict], registry, ctx):
-    rounds, model_index = 0, 0
+    rounds, model_index, retried = 0, 0, False
     while True:
         model = CHAT_MODELS[model_index]
         # Out of rounds: one last call with tools disabled so the model has to answer
         final = rounds >= MAX_TOOL_ROUNDS
         text, calls = [], {}
         try:
-            stream = await groq_client.chat.completions.create(
+            stream = await chat_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=registry.schemas(ctx),
@@ -154,6 +166,16 @@ async def _tool_rounds(messages: list[dict], registry, ctx):
             log.warning("%s is rate-limited, falling back to %s", model, CHAT_MODELS[model_index])
             if text:
                 yield {"type": "retract", "chars": len("".join(text))}
+            continue
+        except TRANSIENT as e:
+            # A brief Groq server or network problem: retry the round once, then give up
+            if retried:
+                raise
+            retried = True
+            log.warning("%s request failed (%s), retrying once", model, type(e).__name__)
+            if text:
+                yield {"type": "retract", "chars": len("".join(text))}
+            await asyncio.sleep(1)
             continue
         except APIError as e:
             # Groq rejects tool calls the model formatted badly, sometimes mid-stream; retry the

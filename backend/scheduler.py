@@ -37,11 +37,12 @@ def start() -> None:
     # who is in their brief window. This also catches up after a restart; claims prevent repeats.
     _scheduler.add_job(safe(brief.run_due), IntervalTrigger(minutes=5), id="morning_brief",
                        max_instances=1, coalesce=True, next_run_time=datetime.now(timezone.utc))
-    # Due reminders, every minute. max_instances=1 so a slow run never overlaps the next
-    _scheduler.add_job(safe(reminders.send_due), IntervalTrigger(minutes=1), id="reminders",
+    # Due reminders, every 10 seconds (each check is one indexed query), so a reminder is at most
+    # ~10s late. max_instances=1 so a slow run never overlaps the next
+    _scheduler.add_job(safe(reminders.send_due), IntervalTrigger(seconds=10), id="reminders",
                        max_instances=1, coalesce=True)
     _scheduler.start()
-    log.info("scheduler started; morning briefs at %s in each user's timezone, reminders every minute",
+    log.info("scheduler started; morning briefs at %s in each user's timezone, reminders every 10 seconds",
              MORNING_BRIEF_TIME)
 
 

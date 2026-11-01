@@ -15,8 +15,9 @@ from fastapi.responses import StreamingResponse
 import db2
 from embeddings import embed, cosine_similarity
 from models import ExchangeIn
-from config import (ALL_FACTS_LIMIT, EMBED_MODEL, FACT_TOP_K, HISTORY_TURNS, LOCAL, MIN_SIMILARITY,
-                    SYSTEM_PROMPT, TOOLS_PROMPT, TOP_K, USER_TIMEZONE)
+from config import (ALL_FACTS_LIMIT, EMBED_MODEL, EXCERPT_CHARS, FACT_TOP_K, HISTORY_TOKENS, HISTORY_TURNS,
+                    LATEST_REPLY_CHARS, LOCAL, MIN_SIMILARITY, OLDER_REPLY_CHARS, SYSTEM_PROMPT, TOOLS_PROMPT,
+                    TOP_K, USER_TIMEZONE)
 from embeddings import embed
 from llm import chat_stream
 from models import ChatRequest, TitleUpdate
@@ -79,12 +80,31 @@ def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memor
         system += "\n\n" + format_memories(memories)
 
     messages = [{"role": "system", "content": system}]
-    for ex in recent:
-        if ex["user_text"]:  # empty for assistant-initiated messages like the morning brief
-            messages.append({"role": "user", "content": ex["user_text"]})
-        messages.append({"role": "assistant", "content": ex["assistant_text"]})
+    for user_turn, assistant_turn in fit_history(recent):
+        if user_turn:  # empty for assistant-initiated messages like the morning brief
+            messages.append({"role": "user", "content": user_turn})
+        messages.append({"role": "assistant", "content": assistant_turn})
     messages.append({"role": "user", "content": user_text})
     return messages
+
+
+def clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + " …[trimmed]"
+
+
+def fit_history(recent: list[dict]) -> list[tuple[str, str]]:
+    """Recent turns, newest kept most fully, within about HISTORY_TOKENS. Long old replies (tables,
+    code) are what blew past Groq's 8K tokens/minute: they were re-sent with every message."""
+    budget, used, fitted = HISTORY_TOKENS * 4, 0, []
+    for age, ex in enumerate(reversed(recent)):
+        user_turn = clip(ex["user_text"], 1000)
+        assistant_turn = clip(ex["assistant_text"], LATEST_REPLY_CHARS if age == 0 else OLDER_REPLY_CHARS)
+        cost = len(user_turn) + len(assistant_turn)
+        if fitted and used + cost > budget:
+            break
+        fitted.append((user_turn, assistant_turn))
+        used += cost
+    return list(reversed(fitted))
 
 
 @router.post("/{conversation_id}/chat")
@@ -247,7 +267,8 @@ def format_memories(memories: list[dict]) -> str:
     lines = ["Relevant excerpts from past conversations with this user:"]
     for m in memories:
         date = m["created_at"][:10]
-        lines.append(f"\n[{date}]\nUser: {m['user_text']}\nAssistant: {m['assistant_text']}")
+        lines.append(f"\n[{date}]\nUser: {clip(m['user_text'], EXCERPT_CHARS)}\n"
+                     f"Assistant: {clip(m['assistant_text'], EXCERPT_CHARS)}")
     return "\n".join(lines)
 
 # def build_messages(recent: list[dict], memories: list[dict], user_text: str) -> list[dict]:

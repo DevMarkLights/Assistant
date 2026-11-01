@@ -4,7 +4,7 @@
 # atomic pending -> sending update before its push goes out, so it can never be sent twice, even
 # with two servers running the job.
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import db2
@@ -56,12 +56,22 @@ def parse_due(value: str, now: datetime, tz: ZoneInfo) -> datetime:
     return due
 
 
-async def create(user_id: str, conversation_id: str, text: str, due_at: str, tz: ZoneInfo) -> str:
+async def create(user_id: str, conversation_id: str, text: str, tz: ZoneInfo,
+                 due_at: str | None = None, in_minutes: float | None = None) -> str:
+    """Either an absolute due_at, or in_minutes from now (exact to the second, which the model
+    can't do itself: its prompt only has the time to the minute)."""
     now = datetime.now(timezone.utc)
-    try:
-        due = parse_due(due_at, now, tz)
-    except ValueError as e:
-        return f"Error: {e}"
+    if in_minutes is not None:
+        if in_minutes <= 0:
+            return "Error: in_minutes must be more than 0."
+        due = now + timedelta(minutes=in_minutes)
+    elif due_at:
+        try:
+            due = parse_due(due_at, now, tz)
+        except ValueError as e:
+            return f"Error: {e}"
+    else:
+        return "Error: pass due_at (a specific time) or in_minutes (a relative time)."
     await db2.add_reminder(user_id, conversation_id, text.strip(), due)
     return f"Reminder set for {display(due, tz)}: {text.strip()}"
 
@@ -96,7 +106,13 @@ async def cancel(user_id: str, tz: ZoneInfo, description: str) -> str:
             at_time = [r for r in pending if any(
                 r["due_at"].astimezone(tz).hour == h and (m is None or r["due_at"].astimezone(tz).minute == m)
                 for h, m in times)]
-            candidates = at_time or pending
+            if not at_time:
+                # They named a time nothing is due at (e.g. one that was already sent): never fall
+                # back to some other reminder
+                listing = "\n".join(f"- {label(r, tz)}" for r in pending)
+                return ("No upcoming reminder is at that time (it may already have been sent), so nothing "
+                        f"was cancelled. Upcoming reminders:\n{listing}")
+            candidates = at_time
         # Then compare meanings on the fly (there are only ever a few reminders)
         query = await embed(description, "query")
         scored = sorted([(cosine_similarity(query, await embed(label(r, tz), "document")), r) for r in candidates],
@@ -104,7 +120,7 @@ async def cancel(user_id: str, tz: ZoneInfo, description: str) -> str:
         best_score, target = scored[0]
         runner_up = scored[1][0] if len(scored) > 1 else 0.0
         # Exactly one reminder at the time they named ("my 10am one") identifies it on its own
-        unique_time_match = len(candidates) == 1 and candidates is not pending
+        unique_time_match = len(candidates) == 1 and bool(times)
         if not unique_time_match and (best_score < CANCEL_CONFIDENT or best_score - runner_up < CANCEL_MARGIN):
             listing = "\n".join(f"- {label(r, tz)}" for _, r in scored[:5])
             return ("Not sure which reminder is meant, so nothing was cancelled. Ask the user which one "
