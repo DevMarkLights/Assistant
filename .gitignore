@@ -4,6 +4,7 @@
 /backend/dist/
 /frontend/dist/
 
-__*
+# Python bytecode caches (a bare __* would also hide every package's __init__.py)
+__pycache__/
 # Piper voice models (large; download on each server, see CLAUDE.md)
 /backend/piper_voices/
