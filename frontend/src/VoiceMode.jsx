@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen, speak, speakable, stopSpeaking } from "./speech";
+import { audioSettled, listen, speak, speakable, stopSpeaking } from "./speech";
 
 const PHASE_LABEL = {
   idle: "Tap to talk",
@@ -17,6 +17,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
   const [reply, setReply] = useState("");
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
+  const [micStage, setMicStage] = useState(null); // what the mic is doing, shown while listening
   const closed = useRef(false);
   const recognition = useRef(null);
 
@@ -26,10 +27,14 @@ export default function VoiceMode({ sendMessage, onClose }) {
       setError(null);
       setStatus(null);
       setHeard("");
+      setMicStage(null);
+      // Don't open the mic while audio is still playing (unlock clip, or the reply just spoken)
+      await audioSettled();
+      if (closed.current) return;
       setPhase("listening");
       let text;
       try {
-        recognition.current = listen(setHeard);
+        recognition.current = listen(setHeard, setMicStage);
         text = await recognition.current.done;
       } catch (e) {
         if (!closed.current) {
@@ -114,6 +119,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
           <span className="orb-core" />
         </button>
         <p className="voice-phase" aria-live="polite">{PHASE_LABEL[phase]}</p>
+        {phase === "listening" && micStage && !heard && <p className="voice-status">{micStage}</p>}
         {status && <p className="voice-status">{status}</p>}
         {heard && <p className="voice-heard">“{heard}”</p>}
         {reply && phase !== "listening" && <p className="voice-reply">{reply}</p>}

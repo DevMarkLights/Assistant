@@ -110,6 +110,11 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
   - **iOS unlock:** iOS only allows speech and audio after a gesture, so `unlockSpeech()` runs in the tap that opens voice mode. It speaks a silent utterance and plays a silent clip on the shared player.
 - **The overlay:** a full-screen layer over the chat with an orb whose CSS states are idle, listening, thinking, speaking and error. `converse()` loops listen → `sendMessage(text, {voice: true, onEvent})` → `speak(speakable(reply))` → listen again, until closed or nothing is heard.
 - **Tapping the orb:** while listening it ends the utterance, while speaking it interrupts, and when idle it starts again.
+- **iOS details:**
+  - **No audio while opening the mic:** `unlockSpeech(engine)` unlocks only the chosen voice source, and `audioSettled()` waits for that clip to finish, plus 250 ms, before every `listen()`. Starting recognition while audio plays can leave iOS's mic "on" but hearing nothing.
+  - **Interim words count:** `listen()` falls back to the last interim words when Safari ends without a final result.
+  - **Silence timeout:** it stops after `SILENCE_MS` (10 s) with no words.
+  - **Diagnostics:** it reports mic stages (`onstart` / `onsoundstart` / `onspeechstart`, plus errors) through `onStage`, shown under "Listening…" and logged to the console as `[speech]`, to show where recognition stalls.
 - **Same pipeline as typing:** messages go through the normal chat path, so they appear in the chat with tools, memory and titles as usual. `Chat.jsx` passes voice mode a `sendMessage` that never changes, through a ref, because a new function on each render would restart the loop.
 - **Spoken replies:** `voice: true` on `ChatRequest` adds `VOICE_PROMPT` (short spoken sentences, no Markdown). `speakable()` still strips Markdown and links, and replaces code and tables with "shown in the chat".
 

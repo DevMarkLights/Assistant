@@ -12,30 +12,52 @@ export const recognitionSupported = Boolean(Recognition);
 export const synthesisSupported = "speechSynthesis" in window;
 
 // Listens for one utterance; the browser stops by itself after a pause. Calls onInterim with the
-// words so far, then resolves with the final text ("" if nothing was said). stop() ends it early.
-export function listen(onInterim) {
+// words so far and onStage with what the mic is doing ("mic on" -> "hearing sound" -> "hearing
+// speech", which shows where it gets stuck), then resolves with the text ("" if nothing was said).
+// Gives up after SILENCE_MS without any words. stop() ends it early.
+const SILENCE_MS = 10000;
+
+export function listen(onInterim, onStage) {
   const recognition = new Recognition();
   recognition.lang = navigator.language || "en-US";
   recognition.interimResults = true;
   recognition.continuous = false;
   recognition.maxAlternatives = 1;
   let finalText = "";
+  let latest = ""; // final + interim words so far
+  const stage = (name) => {
+    console.debug("[speech]", name);
+    onStage?.(name);
+  };
+  let silence = setTimeout(() => recognition.stop(), SILENCE_MS);
   const done = new Promise((resolve, reject) => {
+    recognition.onstart = () => stage("mic on, waiting for sound");
+    recognition.onsoundstart = () => stage("hearing sound");
+    recognition.onspeechstart = () => stage("hearing speech");
     recognition.onresult = (event) => {
+      clearTimeout(silence);
+      silence = null;
       let interim = "";
       finalText = "";
       for (const result of event.results) {
         if (result.isFinal) finalText += result[0].transcript;
         else interim += result[0].transcript;
       }
-      onInterim?.((finalText + interim).trim());
+      latest = (finalText + interim).trim();
+      onInterim?.(latest);
     };
     recognition.onerror = (event) => {
+      stage(`error: ${event.error}`);
       // "no-speech" and "aborted" just mean nothing was said, or we stopped it
       if (event.error === "no-speech" || event.error === "aborted") resolve("");
       else reject(new Error(errorMessage(event.error)));
     };
-    recognition.onend = () => resolve(finalText.trim());
+    recognition.onend = () => {
+      clearTimeout(silence);
+      stage("ended");
+      // Safari sometimes ends without marking anything final: use the last words it heard
+      resolve(finalText.trim() || latest);
+    };
   });
   recognition.start();
   return { done, stop: () => recognition.stop(), abort: () => recognition.abort() };
@@ -138,17 +160,35 @@ const player = typeof Audio !== "undefined" ? new Audio() : null;
 const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 let finishPlayback = null; // resolves the current Piper speak() promise
 
-// iOS only lets a page speak after a user gesture: call this from the tap that opens voice mode
-export function unlockSpeech() {
-  if (synthesisSupported) {
-    const silent = new SpeechSynthesisUtterance(" ");
-    silent.volume = 0;
-    speechSynthesis.speak(silent);
-  }
-  if (player) {
-    player.src = SILENT_WAV;
-    player.play().catch(() => {});
-  }
+// iOS only lets a page speak after a user gesture: call this from the tap that opens voice mode.
+// Only the chosen voice source is unlocked, and audioSettled() waits for that silent clip to finish:
+// starting the mic while audio plays can leave iOS recognition "on" but hearing nothing.
+let unlocking = Promise.resolve();
+
+export function unlockSpeech(engine = savedEngine()) {
+  unlocking = new Promise((resolve) => {
+    setTimeout(resolve, 600); // in case neither finishes cleanly
+    if (engine === "piper" && player) {
+      player.onended = () => resolve();
+      player.src = SILENT_WAV;
+      player.play().catch(() => resolve());
+    } else if (synthesisSupported) {
+      const silent = new SpeechSynthesisUtterance(" ");
+      silent.volume = 0;
+      silent.onend = () => resolve();
+      silent.onerror = () => resolve();
+      speechSynthesis.speak(silent);
+    } else {
+      resolve();
+    }
+  });
+}
+
+// Resolves once unlock audio has finished, plus a short pause so iOS can switch the audio
+// session from playing back to recording
+export async function audioSettled() {
+  await unlocking;
+  await new Promise((resolve) => setTimeout(resolve, 250));
 }
 
 // Speaks the text with the voice chosen in Settings, or the given override; resolves when it
