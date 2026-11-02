@@ -1,0 +1,107 @@
+# Username/password authentication: register, login, logout, and the current_user dependency.
+# Sessions are random tokens kept in an httpOnly cookie; only their SHA-256 hash is stored in MongoDB.
+import hashlib
+import re
+import secrets
+from datetime import timedelta
+
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from pwdlib import PasswordHash
+
+from app import db
+from app.core.config import ALLOW_SIGNUP, COOKIE_SECURE, SESSION_DAYS
+from app.api.schemas import Credentials
+
+COOKIE_NAME = "session"
+USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
+
+password_hash = PasswordHash.recommended()
+# Verified against when the username doesn't exist, so login takes the same time either way
+DUMMY_HASH = password_hash.hash("not-a-real-password")
+
+router = APIRouter(prefix="/Assistant/api/auth", tags=["auth"])
+
+API_PREFIX = "/Assistant/api/"
+# The only API routes reachable without a session. Everything else under API_PREFIX,
+# including routes added later and paths that don't exist, gets a 401 when logged out.
+PUBLIC_API_PATHS = {
+    "/Assistant/api/auth/login",
+    "/Assistant/api/auth/register",
+    "/Assistant/api/auth/logout",
+}
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def _start_session(response: Response, user_id: str):
+    token = secrets.token_urlsafe(32)
+    max_age = timedelta(days=SESSION_DAYS)
+    await db.create_session(_hash_token(token), user_id, db.now() + max_age)
+    response.set_cookie(
+        COOKIE_NAME, token,
+        max_age=int(max_age.total_seconds()),
+        httponly=True, samesite="lax", secure=COOKIE_SECURE, path="/Assistant",
+    )
+
+
+async def _session_user(token: str | None) -> dict | None:
+    return await db.get_session_user(_hash_token(token)) if token else None
+
+
+async def require_login(request: Request, call_next):
+    """HTTP middleware: default-deny for the API. Stashes the user on request.state."""
+    path = request.url.path
+    if path.startswith(API_PREFIX) and path not in PUBLIC_API_PATHS:
+        user = await _session_user(request.cookies.get(COOKIE_NAME))
+        if not user:
+            return JSONResponse({"detail": "Not logged in"}, status_code=401)
+        request.state.user = user
+    return await call_next(request)
+
+
+async def current_user(request: Request, session: str | None = Cookie(default=None)) -> dict:
+    # The middleware has normally looked the user up already; fall back to the cookie otherwise
+    user = getattr(request.state, "user", None) or await _session_user(session)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return user
+
+
+@router.post("/register")
+async def register(creds: Credentials, response: Response):
+    if not ALLOW_SIGNUP:
+        raise HTTPException(status_code=403, detail="Sign-up is disabled")
+    username = creds.username.strip().lower()
+    if not USERNAME_RE.match(username):
+        raise HTTPException(status_code=400,
+                            detail="Username must be 3-32 characters: letters, numbers, . _ -")
+    user = await db.create_user(username, password_hash.hash(creds.password))
+    if not user:
+        raise HTTPException(status_code=409, detail="Username is taken")
+    await _start_session(response, user["id"])
+    return user
+
+
+@router.post("/login")
+async def login(creds: Credentials, response: Response):
+    user = await db.get_user_with_hash(creds.username.strip().lower())
+    valid = password_hash.verify(creds.password, user["password_hash"] if user else DUMMY_HASH)
+    if not user or not valid:
+        raise HTTPException(status_code=401, detail="Wrong username or password")
+    await _start_session(response, user["id"])
+    return {"id": user["id"], "username": user["username"]}
+
+
+@router.post("/logout", status_code=204)
+async def logout(response: Response, session: str | None = Cookie(default=None)):
+    if session:
+        await db.delete_session(_hash_token(session))
+    response.delete_cookie(COOKIE_NAME, path="/Assistant")
+
+
+@router.get("/me")
+async def me(user: dict = Depends(current_user)):
+    return user

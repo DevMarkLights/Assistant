@@ -27,8 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # import backend modules
 
-import llm  # noqa: E402
-import memory_writer  # noqa: E402
+from app.llm import client as llm  # noqa: E402
+from app.memory import writer as memory_writer  # noqa: E402
 from groq import RateLimitError  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
