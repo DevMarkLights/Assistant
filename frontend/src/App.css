@@ -994,104 +994,38 @@ div.tool-call {
   text-align: center;
 }
 
-.orb {
+.voice-visual-button {
   position: relative;
-  width: 168px;
-  height: 168px;
-  margin-bottom: 18px;
+  width: min(440px, 92vw);
+  height: min(220px, 46vw);
+  margin-bottom: 4px;
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: 16px;
   background: none;
   cursor: pointer;
 }
 
-.orb:disabled {
+.voice-visual-button:disabled {
   cursor: default;
 }
 
-.orb:focus-visible {
+.voice-visual-button:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 8px;
+  outline-offset: 4px;
 }
 
-.orb-core,
-.orb-ring {
-  position: absolute;
-  inset: 0;
+.voice-visual-button.orb {
+  width: min(280px, 66vw);
+  height: min(280px, 66vw);
   border-radius: 50%;
 }
 
-.orb-core {
-  background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 55%, white), var(--button) 55%, color-mix(in srgb, var(--button) 60%, black));
-  box-shadow: 0 0 60px color-mix(in srgb, var(--accent) 45%, transparent);
-  transition: transform 0.3s ease, filter 0.3s ease;
-}
-
-.orb-ring {
-  border: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  opacity: 0;
-}
-
-/* Idle / error: resting, slightly dimmed */
-.voice-overlay.idle .orb-core,
-.voice-overlay.error .orb-core {
-  filter: saturate(0.6) brightness(0.85);
-  transform: scale(0.92);
-}
-
-/* Listening: breathing core, ripples going out */
-.voice-overlay.listening .orb-core {
-  animation: orb-breathe 1.6s ease-in-out infinite;
-}
-
-.voice-overlay.listening .orb-ring {
-  animation: orb-ripple 1.6s ease-out infinite;
-}
-
-/* Thinking: a shimmer sweeping around */
-.voice-overlay.thinking .orb-core {
-  background:
-    conic-gradient(from 0deg, transparent, color-mix(in srgb, white 35%, transparent), transparent 40%),
-    radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 55%, white), var(--button) 55%, color-mix(in srgb, var(--button) 60%, black));
-  animation: orb-spin 1.4s linear infinite;
-}
-
-/* Speaking: quicker, livelier pulse */
-.voice-overlay.speaking .orb-core {
-  animation: orb-talk 0.5s ease-in-out infinite alternate;
-}
-
-@keyframes orb-breathe {
-  50% {
-    transform: scale(1.06);
-  }
-}
-
-@keyframes orb-ripple {
-  from {
-    opacity: 0.7;
-    transform: scale(1);
-  }
-  to {
-    opacity: 0;
-    transform: scale(1.45);
-  }
-}
-
-@keyframes orb-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes orb-talk {
-  from {
-    transform: scale(0.97);
-  }
-  to {
-    transform: scale(1.08);
-  }
+/* The animated canvas (VoiceVisual.jsx) fills the tap target */
+.voice-visual {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .voice-phase {
@@ -1144,9 +1078,7 @@ div.tool-call {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .voice-overlay,
-  .voice-overlay .orb-core,
-  .voice-overlay .orb-ring {
+  .voice-overlay {
     animation: none !important;
   }
 }

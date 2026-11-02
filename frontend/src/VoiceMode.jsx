@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { audioSettled, listen, speak, speakable, splitWords, stopSpeaking } from "./speech";
+import { audioSettled, listen, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
+import VoiceVisual from "./VoiceVisual";
 
 const PHASE_LABEL = {
   idle: "Tap to talk",
@@ -13,12 +14,15 @@ const PHASE_LABEL = {
 // Messages go through the normal chat pipeline (sendMessage), so they also appear in the chat.
 export default function VoiceMode({ sendMessage, onClose }) {
   const [phase, setPhase] = useState("idle");
+  const [look] = useState(savedLook); // wave or orb, chosen in Settings
   const [heard, setHeard] = useState("");
   const [reply, setReply] = useState("");
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [micStage, setMicStage] = useState(null); // what the mic is doing, shown while listening
   const [spokenWord, setSpokenWord] = useState(-1); // index of the word being spoken, for highlighting
+  const [activity, setActivity] = useState(0); // bumped on every heard or spoken word: animates the visual
+  const bump = useCallback(() => setActivity((n) => n + 1), []);
   const replyRef = useRef(null);
   const closed = useRef(false);
   const recognition = useRef(null);
@@ -36,7 +40,10 @@ export default function VoiceMode({ sendMessage, onClose }) {
       setPhase("listening");
       let text;
       try {
-        recognition.current = listen(setHeard, setMicStage);
+        recognition.current = listen((words) => {
+          setHeard(words);
+          bump();
+        }, setMicStage);
         text = await recognition.current.done;
       } catch (e) {
         if (!closed.current) {
@@ -73,9 +80,17 @@ export default function VoiceMode({ sendMessage, onClose }) {
       setSpokenWord(-1);
       setPhase("speaking");
       // resolves early if interrupted, then we listen again
-      await speak(speakable(answer), { onWord: (i) => !closed.current && setSpokenWord(i) });
+      await speak(speakable(answer), {
+        onWord: (i) => {
+          if (closed.current) return;
+          setSpokenWord((prev) => {
+            if (prev !== i) bump();
+            return i;
+          });
+        },
+      });
     }
-  }, [sendMessage]);
+  }, [sendMessage, bump]);
 
   // Start listening as soon as voice mode opens (it opens from a tap, which also unlocked speech)
   useEffect(() => {
@@ -124,10 +139,9 @@ export default function VoiceMode({ sendMessage, onClose }) {
       </button>
 
       <div className="voice-stage">
-        <button className="orb" onClick={tapOrb} disabled={phase === "thinking"}
+        <button className={`voice-visual-button ${look}`} onClick={tapOrb} disabled={phase === "thinking"}
           aria-label={phase === "listening" ? "Stop listening" : phase === "speaking" ? "Interrupt" : "Start talking"}>
-          <span className="orb-ring" />
-          <span className="orb-core" />
+          <VoiceVisual phase={phase} activity={activity} look={look} />
         </button>
         <p className="voice-phase" aria-live="polite">{PHASE_LABEL[phase]}</p>
         {phase === "listening" && micStage && !heard && <p className="voice-status">{micStage}</p>}

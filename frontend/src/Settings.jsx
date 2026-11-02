@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  MAX_SPEED, MIN_SPEED, englishVoices, piperVoices, recognitionSupported, saveEngine, savePiperVoice, saveSpeed,
-  saveVoiceURI, savedEngine, savedPiperVoice, savedSpeed, savedVoiceURI, speak, synthesisSupported, unlockSpeech,
+  MAX_SPEED, MIN_SPEED, englishVoices, piperVoices, recognitionSupported, saveEngine, saveLook, savePiperVoice, saveSpeed,
+  saveVoiceURI, savedEngine, savedLook, savedPiperVoice, savedSpeed, savedVoiceURI, speak, synthesisSupported, unlockSpeech,
 } from "./speech";
 
 // VAPID keys are base64url; PushManager.subscribe wants raw bytes
@@ -31,6 +31,7 @@ function VoiceSettings() {
   const [piperVoice, setPiperVoice] = useState(savedPiperVoice);
   const [serverError, setServerError] = useState(null);
   const [speed, setSpeed] = useState(savedSpeed);
+  const [look, setLook] = useState(savedLook);
 
   useEffect(() => {
     if (!synthesisSupported) return;
@@ -142,6 +143,13 @@ function VoiceSettings() {
             <button type="button" className="link-button" onClick={() => { setSpeed(1); saveSpeed(1); }}>Normal</button>
             <span>Faster</span>
           </span>
+        </label>
+        <label className="voice-picker">
+          <span>Animation</span>
+          <select value={look} onChange={(e) => { setLook(e.target.value); saveLook(e.target.value); }}>
+            <option value="wave">Wave</option>
+            <option value="orb">Orb</option>
+          </select>
         </label>
         {serverVoices && !serverVoices.length && (
           <p className="settings-message">

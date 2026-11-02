@@ -8,6 +8,7 @@ const VOICE_KEY = "voiceURI";
 const ENGINE_KEY = "voiceEngine"; // "device" or "piper"
 const PIPER_KEY = "piperVoice";
 const SPEED_KEY = "voiceSpeed";
+const LOOK_KEY = "voiceLook"; // voice-mode animation: "wave" or "orb"
 export const MIN_SPEED = 0.75;
 export const MAX_SPEED = 1.5;
 
@@ -125,6 +126,8 @@ export function savedSpeed() {
   return Number.isFinite(speed) ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed)) : 1;
 }
 export const saveSpeed = (speed) => store(SPEED_KEY, speed === 1 ? "" : String(speed));
+export const savedLook = () => (load(LOOK_KEY) === "orb" ? "orb" : "wave");
+export const saveLook = (look) => store(LOOK_KEY, look === "orb" ? "orb" : "");
 
 // Piper voices installed on the server: [{ id, name }]
 export async function piperVoices() {
