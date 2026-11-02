@@ -18,29 +18,75 @@ export const synthesisSupported = "speechSynthesis" in window;
 // Listens for one utterance; the browser stops by itself after a pause. Calls onInterim with the
 // words so far and onStage with what the mic is doing ("mic on" -> "hearing sound" -> "hearing
 // speech", which shows where it gets stuck), then resolves with the text ("" if nothing was said).
-// Gives up after SILENCE_MS without any words. stop() ends it early.
+// Gives up after SILENCE_MS without any words (per mic start). stop() ends it early.
 const SILENCE_MS = 10000;
+// Safari (especially on iOS) sometimes starts recognition with a dead mic after speech playback:
+// "mic on" but no audio ever arrives. If no sound is heard this long after the mic starts, quietly
+// restart recognition, up to NO_SOUND_RETRIES times.
+const NO_SOUND_MS = 4000;
+const NO_SOUND_RETRIES = 2;
 
 export function listen(onInterim, onStage) {
-  const recognition = new Recognition();
-  recognition.lang = navigator.language || "en-US";
-  recognition.interimResults = true;
-  recognition.continuous = false;
-  recognition.maxAlternatives = 1;
+  let recognition = null;
   let finalText = "";
   let latest = ""; // final + interim words so far
+  let retries = 0;
+  let finished = false;
+  let stopped = false; // stop() or abort() was called: never restart after that
+  let restartPending = false; // between a dead mic's end and the restarted one
+  let silence = null;
+  let deadMic = null;
+  let settle;
+  const done = new Promise((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  const finish = (ok, value) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(silence);
+    clearTimeout(deadMic);
+    if (ok) settle.resolve(value);
+    else settle.reject(value);
+  };
+  const heardText = () => finalText.trim() || latest;
   const stage = (name) => {
     console.debug("[speech]", name);
     onStage?.(name);
   };
-  let silence = setTimeout(() => recognition.stop(), SILENCE_MS);
-  const done = new Promise((resolve, reject) => {
-    recognition.onstart = () => stage("mic on, waiting for sound");
-    recognition.onsoundstart = () => stage("hearing sound");
-    recognition.onspeechstart = () => stage("hearing speech");
-    recognition.onresult = (event) => {
+
+  const start = () => {
+    restartPending = false;
+    if (finished) return;
+    const rec = new Recognition();
+    recognition = rec;
+    rec.lang = navigator.language || "en-US";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    let heardSound = false;
+    let restarting = false;
+    clearTimeout(silence);
+    silence = setTimeout(() => rec.stop(), SILENCE_MS);
+
+    rec.onstart = () => {
+      stage(retries ? `mic restarted (${retries}), waiting for sound` : "mic on, waiting for sound");
+      deadMic = setTimeout(() => {
+        if (heardSound || finished || stopped || retries >= NO_SOUND_RETRIES) return;
+        restarting = true;
+        rec.abort();
+      }, NO_SOUND_MS);
+    };
+    const heard = (name) => () => {
+      heardSound = true;
+      clearTimeout(deadMic);
+      stage(name);
+    };
+    rec.onsoundstart = heard("hearing sound");
+    rec.onspeechstart = heard("hearing speech");
+    rec.onresult = (event) => {
+      heardSound = true;
+      clearTimeout(deadMic);
       clearTimeout(silence);
-      silence = null;
       let interim = "";
       finalText = "";
       for (const result of event.results) {
@@ -50,21 +96,36 @@ export function listen(onInterim, onStage) {
       latest = (finalText + interim).trim();
       onInterim?.(latest);
     };
-    recognition.onerror = (event) => {
+    rec.onerror = (event) => {
+      if (restarting && !stopped) return; // our own abort, to restart a dead mic
       stage(`error: ${event.error}`);
       // "no-speech" and "aborted" just mean nothing was said, or we stopped it
-      if (event.error === "no-speech" || event.error === "aborted") resolve("");
-      else reject(new Error(errorMessage(event.error)));
+      if (event.error === "no-speech" || event.error === "aborted") finish(true, heardText());
+      else finish(false, Object.assign(new Error(errorMessage(event.error)), { code: event.error }));
     };
-    recognition.onend = () => {
-      clearTimeout(silence);
+    rec.onend = () => {
+      clearTimeout(deadMic);
+      if (restarting && !stopped && !finished) {
+        retries++;
+        restartPending = true;
+        stage("no sound, restarting mic");
+        setTimeout(start, 150);
+        return;
+      }
       stage("ended");
       // Safari sometimes ends without marking anything final: use the last words it heard
-      resolve(finalText.trim() || latest);
+      finish(true, heardText());
     };
-  });
-  recognition.start();
-  return { done, stop: () => recognition.stop(), abort: () => recognition.abort() };
+    rec.start();
+  };
+  start();
+
+  const end = (method) => {
+    stopped = true;
+    if (restartPending) finish(true, heardText()); // in the gap while restarting: end right away
+    else recognition?.[method]();
+  };
+  return { done, stop: () => end("stop"), abort: () => end("abort") };
 }
 
 function errorMessage(code) {
@@ -196,11 +257,26 @@ export function unlockSpeech(engine = savedEngine()) {
   });
 }
 
-// Resolves once unlock audio has finished, plus a short pause so iOS can switch the audio
-// session from playing back to recording
+// When speech playback last ended. The mic waits SETTLE_MS after that (and after the unlock clip)
+// so iOS/Safari can switch the audio session from playing back to recording; opening the mic too
+// soon after playback can leave recognition "on" but hearing nothing.
+let lastAudioEnd = 0;
+const SETTLE_MS = 600;
+
+function audioEnded() {
+  lastAudioEnd = performance.now();
+  // Release the Piper player so it stops holding the audio session in playback mode
+  if (player && player.getAttribute("src")) {
+    player.removeAttribute("src");
+    player.load();
+  }
+}
+
+// Resolves once unlock audio and any spoken reply have finished, plus the settle pause
 export async function audioSettled() {
   await unlocking;
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  const wait = Math.max(250, lastAudioEnd + SETTLE_MS - performance.now());
+  await new Promise((resolve) => setTimeout(resolve, wait));
 }
 
 // Speaks the text with the voice chosen in Settings, or the given override; resolves when it
@@ -211,13 +287,17 @@ export async function speak(text, {
   engine = savedEngine(), voiceURI, piperVoice = savedPiperVoice(), speed = savedSpeed(), onWord,
 } = {}) {
   if (!text) return;
-  if (engine === "piper" && piperVoice && player) {
-    const { rest, fromWord } = await speakWithPiper(text, piperVoice, speed, onWord);
-    if (!rest) return;
-    // Piper failed partway (or at the start): say the rest with a device voice, without repeating
-    return speakOnDevice(rest, voiceURI, speed, onWord, fromWord);
+  try {
+    if (engine === "piper" && piperVoice && player) {
+      const { rest, fromWord } = await speakWithPiper(text, piperVoice, speed, onWord);
+      if (!rest) return;
+      // Piper failed partway (or at the start): say the rest with a device voice, without repeating
+      return await speakOnDevice(rest, voiceURI, speed, onWord, fromWord);
+    }
+    return await speakOnDevice(text, voiceURI, speed, onWord, 0);
+  } finally {
+    audioEnded();
   }
-  return speakOnDevice(text, voiceURI, speed, onWord, 0);
 }
 
 // The words of a text, the way speech highlighting counts them
