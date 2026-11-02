@@ -66,30 +66,36 @@ async def preload() -> None:
             log.warning("couldn't load Piper voice %s", voice["id"], exc_info=True)
 
 
-def _synthesize(voice_id: str, text: str) -> bytes:
+def _synthesize(voice_id: str, text: str, speed: float) -> bytes:
+    from piper.config import SynthesisConfig
+
     voice = _load(voice_id)
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
-        voice.synthesize_wav(text, wav)
+        # Piper's length_scale stretches speech: above 1 is slower, below 1 faster. Changing it
+        # makes the voice actually talk faster, rather than speeding up the audio afterwards.
+        voice.synthesize_wav(text, wav, syn_config=SynthesisConfig(length_scale=1 / speed))
     return buffer.getvalue()
 
 
-async def synthesize(voice_id: str, text: str) -> bytes:
+async def synthesize(voice_id: str, text: str, speed: float = 1.0) -> bytes:
     """WAV audio for the text. Runs in a worker thread (Piper is CPU-bound), one request per voice
     at a time."""
     lock = _locks.setdefault(voice_id, asyncio.Lock())
     async with lock:
         started = time.perf_counter()
-        audio = await asyncio.to_thread(_synthesize, voice_id, text)
+        audio = await asyncio.to_thread(_synthesize, voice_id, text, speed)
     with wave.open(io.BytesIO(audio)) as wav:
         seconds = wav.getnframes() / wav.getframerate()
-    log.info("tts %s: %d chars -> %.1fs of audio in %.2fs", voice_id, len(text), seconds, time.perf_counter() - started)
+    log.info("tts %s at %.2fx: %d chars -> %.1fs of audio in %.2fs", voice_id, speed, len(text), seconds,
+             time.perf_counter() - started)
     return audio
 
 
 class SpeechRequest(BaseModel):
     text: str = Field(min_length=1, max_length=3000)
     voice: str = Field(min_length=1, max_length=200)
+    speed: float = Field(1.0, ge=0.5, le=2.0)  # 1.0 = the voice's normal pace
 
 
 @router.get("/voices")
@@ -103,7 +109,7 @@ async def speak(req: SpeechRequest):
     if req.voice not in {v["id"] for v in available_voices()}:
         raise HTTPException(status_code=404, detail="That Piper voice isn't installed on the server")
     try:
-        audio = await synthesize(req.voice, req.text)
+        audio = await synthesize(req.voice, req.text, req.speed)
     except ImportError:
         raise HTTPException(status_code=503, detail="Piper isn't installed on the server")
     except Exception:

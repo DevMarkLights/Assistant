@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  englishVoices, piperVoices, recognitionSupported, saveEngine, savePiperVoice, saveVoiceURI, savedEngine,
-  savedPiperVoice, savedVoiceURI, speak, synthesisSupported, unlockSpeech,
+  MAX_SPEED, MIN_SPEED, englishVoices, piperVoices, recognitionSupported, saveEngine, savePiperVoice, saveSpeed,
+  saveVoiceURI, savedEngine, savedPiperVoice, savedSpeed, savedVoiceURI, speak, synthesisSupported, unlockSpeech,
 } from "./speech";
 
 // VAPID keys are base64url; PushManager.subscribe wants raw bytes
@@ -30,6 +30,7 @@ function VoiceSettings() {
   const [serverVoices, setServerVoices] = useState(null); // null while loading
   const [piperVoice, setPiperVoice] = useState(savedPiperVoice);
   const [serverError, setServerError] = useState(null);
+  const [speed, setSpeed] = useState(savedSpeed);
 
   useEffect(() => {
     if (!synthesisSupported) return;
@@ -62,7 +63,7 @@ function VoiceSettings() {
 
   function preview() {
     unlockSpeech();
-    speak("Hello, I'm your assistant. How can I help?", { engine, voiceURI: voiceURI || undefined, piperVoice });
+    speak("Hello, I'm your assistant. How can I help?", { engine, voiceURI: voiceURI || undefined, piperVoice, speed });
   }
 
   return (
@@ -119,6 +120,29 @@ function VoiceSettings() {
             </select>
           </label>
         )}
+        <label className="voice-picker speed-picker">
+          <span>
+            Speed <strong>{speed.toFixed(2)}×</strong>
+          </span>
+          <input
+            type="range"
+            min={MIN_SPEED}
+            max={MAX_SPEED}
+            step="0.05"
+            value={speed}
+            onChange={(e) => {
+              const value = parseFloat(e.target.value);
+              setSpeed(value);
+              saveSpeed(value);
+            }}
+            aria-valuetext={`${speed.toFixed(2)} times normal speed`}
+          />
+          <span className="speed-scale">
+            <span>Slower</span>
+            <button type="button" className="link-button" onClick={() => { setSpeed(1); saveSpeed(1); }}>Normal</button>
+            <span>Faster</span>
+          </span>
+        </label>
         {serverVoices && !serverVoices.length && (
           <p className="settings-message">
             {serverError || "No Piper voices are installed on the server yet."}

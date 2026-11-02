@@ -7,6 +7,9 @@ const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const VOICE_KEY = "voiceURI";
 const ENGINE_KEY = "voiceEngine"; // "device" or "piper"
 const PIPER_KEY = "piperVoice";
+const SPEED_KEY = "voiceSpeed";
+export const MIN_SPEED = 0.75;
+export const MAX_SPEED = 1.5;
 
 export const recognitionSupported = Boolean(Recognition);
 export const synthesisSupported = "speechSynthesis" in window;
@@ -116,6 +119,12 @@ export const savedEngine = () => (load(ENGINE_KEY) === "piper" ? "piper" : "devi
 export const saveEngine = (engine) => store(ENGINE_KEY, engine === "piper" ? "piper" : "");
 export const savedPiperVoice = () => load(PIPER_KEY);
 export const savePiperVoice = (id) => store(PIPER_KEY, id);
+// Speaking speed, 1 = normal; applies to both device and Piper voices
+export function savedSpeed() {
+  const speed = parseFloat(load(SPEED_KEY));
+  return Number.isFinite(speed) ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed)) : 1;
+}
+export const saveSpeed = (speed) => store(SPEED_KEY, speed === 1 ? "" : String(speed));
 
 // Piper voices installed on the server: [{ id, name }]
 export async function piperVoices() {
@@ -195,15 +204,17 @@ export async function audioSettled() {
 // finishes or is stopped. Piper failures (server down, voice removed) fall back to a device voice.
 // onWord(i) is called with the index (in splitWords(text)) of the word being spoken, for
 // highlighting: exact for device voices that report word boundaries, estimated otherwise.
-export async function speak(text, { engine = savedEngine(), voiceURI, piperVoice = savedPiperVoice(), onWord } = {}) {
+export async function speak(text, {
+  engine = savedEngine(), voiceURI, piperVoice = savedPiperVoice(), speed = savedSpeed(), onWord,
+} = {}) {
   if (!text) return;
   if (engine === "piper" && piperVoice && player) {
-    const { rest, fromWord } = await speakWithPiper(text, piperVoice, onWord);
+    const { rest, fromWord } = await speakWithPiper(text, piperVoice, speed, onWord);
     if (!rest) return;
     // Piper failed partway (or at the start): say the rest with a device voice, without repeating
-    return speakOnDevice(rest, voiceURI, onWord, fromWord);
+    return speakOnDevice(rest, voiceURI, speed, onWord, fromWord);
   }
-  return speakOnDevice(text, voiceURI, onWord, 0);
+  return speakOnDevice(text, voiceURI, speed, onWord, 0);
 }
 
 // The words of a text, the way speech highlighting counts them
@@ -249,11 +260,11 @@ export function chunkText(text, max = 220, firstMax = 120) {
 
 let speechRun = 0; // bumped by stopSpeaking() so an in-progress Piper run stops between chunks
 
-async function fetchPiperAudio(text, voice) {
+async function fetchPiperAudio(text, voice, speed) {
   const res = await fetch("/Assistant/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice }),
+    body: JSON.stringify({ text, voice, speed }),
   });
   if (!res.ok) throw new Error(`server speech failed (${res.status})`);
   return URL.createObjectURL(await res.blob());
@@ -286,13 +297,13 @@ function discard(pending) {
 // Returns "" when done (or stopped), or the text that couldn't be spoken if Piper failed.
 // Returns { rest: "", ... } when done or stopped; if Piper failed, rest is the unspoken text and
 // fromWord the index of its first word in the full text (so highlighting carries on correctly).
-async function speakWithPiper(text, voice, onWord) {
+async function speakWithPiper(text, voice, speed, onWord) {
   const run = ++speechRun;
   const chunks = chunkText(text.slice(0, 6000));
   const chunkWords = chunks.map(splitWords);
   const firstWord = chunkWords.map((_, i) => chunkWords.slice(0, i).reduce((n, w) => n + w.length, 0));
   const failed = (i) => (run === speechRun ? { rest: chunks.slice(i).join(" "), fromWord: firstWord[i] } : { rest: "" });
-  let next = fetchPiperAudio(chunks[0], voice);
+  let next = fetchPiperAudio(chunks[0], voice, speed);
   for (let i = 0; i < chunks.length; i++) {
     let url;
     try {
@@ -305,7 +316,7 @@ async function speakWithPiper(text, voice, onWord) {
       URL.revokeObjectURL(url);
       return { rest: "" };
     }
-    next = i + 1 < chunks.length ? fetchPiperAudio(chunks[i + 1], voice) : null;
+    next = i + 1 < chunks.length ? fetchPiperAudio(chunks[i + 1], voice, speed) : null;
     try {
       // Piper gives no word timings: estimate the word from how far through this chunk's audio we are
       await play(url, (progress) => onWord?.(firstWord[i] + wordAt(chunkWords[i], progress)));
@@ -328,7 +339,7 @@ async function speakWithPiper(text, voice, onWord) {
 const WORDS_PER_SECOND = 2.7; // typical speaking pace, for voices that don't report word boundaries
 
 // fromWord: index in the full text of this text's first word (non-zero after a Piper fallback)
-async function speakOnDevice(text, voiceURI, onWord, fromWord = 0) {
+async function speakOnDevice(text, voiceURI, speed = 1, onWord, fromWord = 0) {
   if (!synthesisSupported) return;
   await loadVoices();
   // Character offset where each word starts, to turn boundary events into word indexes
@@ -342,7 +353,7 @@ async function speakOnDevice(text, voiceURI, onWord, fromWord = 0) {
       utterance.voice = voice;
       utterance.lang = voice.lang;
     }
-    utterance.rate = 1.05;
+    utterance.rate = 1.05 * speed; // 1.05: device voices sound a little slow at their default
     let reported = false;
     utterance.onboundary = (event) => {
       if (event.name && event.name !== "word") return;

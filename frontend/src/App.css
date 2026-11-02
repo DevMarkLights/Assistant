@@ -1199,6 +1199,33 @@ div.tool-call {
   color: var(--text-muted);
 }
 
+.speed-picker strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.speed-picker input[type="range"] {
+  width: 100%;
+  min-height: 32px;
+  accent-color: var(--accent);
+}
+
+.speed-scale {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+
+.link-button {
+  border: none;
+  background: none;
+  padding: 4px 8px;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .voice-picker select {
   min-height: 44px;
   padding: 0 10px;
