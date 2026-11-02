@@ -5,6 +5,7 @@
 import asyncio
 import io
 import json
+import time
 import wave
 from pathlib import Path
 
@@ -78,7 +79,12 @@ async def synthesize(voice_id: str, text: str) -> bytes:
     at a time."""
     lock = _locks.setdefault(voice_id, asyncio.Lock())
     async with lock:
-        return await asyncio.to_thread(_synthesize, voice_id, text)
+        started = time.perf_counter()
+        audio = await asyncio.to_thread(_synthesize, voice_id, text)
+    with wave.open(io.BytesIO(audio)) as wav:
+        seconds = wav.getnframes() / wav.getframerate()
+    log.info("tts %s: %d chars -> %.1fs of audio in %.2fs", voice_id, len(text), seconds, time.perf_counter() - started)
+    return audio
 
 
 class SpeechRequest(BaseModel):

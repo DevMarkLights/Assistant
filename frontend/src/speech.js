@@ -196,35 +196,102 @@ export async function audioSettled() {
 export async function speak(text, { engine = savedEngine(), voiceURI, piperVoice = savedPiperVoice() } = {}) {
   if (!text) return;
   if (engine === "piper" && piperVoice && player) {
-    try {
-      return await speakWithPiper(text, piperVoice);
-    } catch (e) {
-      console.warn("Piper speech failed; using a device voice instead:", e);
-    }
+    const unspoken = await speakWithPiper(text, piperVoice);
+    if (!unspoken) return;
+    // Piper failed partway (or at the start): say the rest with a device voice, without repeating
+    return speakOnDevice(unspoken, voiceURI);
   }
   return speakOnDevice(text, voiceURI);
 }
 
-async function speakWithPiper(text, voice) {
+// Splits text into sentence-sized pieces (about `max` characters), so speech can start after the
+// first one is generated instead of after the whole reply. The first piece is kept shorter
+// (`firstMax`): its generation time is the wait before the first word; later pieces are generated
+// while earlier ones play.
+export function chunkText(text, max = 220, firstMax = 120) {
+  if (text.trim().length <= firstMax) return [text.trim()]; // short replies: one request
+  const sentences = text.match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) || [text];
+  const chunks = [];
+  for (let sentence of sentences.map((x) => x.trim()).filter(Boolean)) {
+    const limit = () => (chunks.length ? max : firstMax);
+    while (sentence.length > limit()) {
+      const lim = limit();
+      // An overlong sentence: break at the last comma or space before the limit
+      const cut = Math.max(sentence.lastIndexOf(", ", lim), sentence.lastIndexOf(" ", lim));
+      const at = cut > lim / 2 ? cut + 1 : lim;
+      chunks.push(sentence.slice(0, at).trim());
+      sentence = sentence.slice(at).trim();
+    }
+    const last = chunks[chunks.length - 1];
+    // Never grow the first piece: it should be ready as soon as possible
+    if (last && chunks.length > 1 && last.length + sentence.length + 1 <= max) chunks[chunks.length - 1] = `${last} ${sentence}`;
+    else if (sentence) chunks.push(sentence);
+  }
+  return chunks;
+}
+
+let speechRun = 0; // bumped by stopSpeaking() so an in-progress Piper run stops between chunks
+
+async function fetchPiperAudio(text, voice) {
   const res = await fetch("/Assistant/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: text.slice(0, 3000), voice }),
+    body: JSON.stringify({ text, voice }),
   });
   if (!res.ok) throw new Error(`server speech failed (${res.status})`);
-  const url = URL.createObjectURL(await res.blob());
-  try {
-    await new Promise((resolve, reject) => {
-      finishPlayback = resolve;
-      player.onended = () => resolve();
-      player.onerror = () => reject(new Error("audio playback failed"));
-      player.src = url;
-      player.play().catch(reject);
-    });
-  } finally {
-    finishPlayback = null;
-    URL.revokeObjectURL(url);
+  return URL.createObjectURL(await res.blob());
+}
+
+function play(url) {
+  return new Promise((resolve, reject) => {
+    finishPlayback = resolve;
+    player.onended = () => resolve();
+    player.onerror = () => reject(new Error("audio playback failed"));
+    player.src = url;
+    player.play().catch(reject);
+  });
+}
+
+// A prefetched chunk that won't be played: release its audio and ignore its errors
+function discard(pending) {
+  pending?.then((url) => URL.revokeObjectURL(url), () => {});
+}
+
+// Generates and plays the text chunk by chunk, fetching the next chunk while the current one plays.
+// Returns "" when done (or stopped), or the text that couldn't be spoken if Piper failed.
+async function speakWithPiper(text, voice) {
+  const run = ++speechRun;
+  const chunks = chunkText(text.slice(0, 6000));
+  let next = fetchPiperAudio(chunks[0], voice);
+  for (let i = 0; i < chunks.length; i++) {
+    let url;
+    try {
+      url = await next;
+    } catch (e) {
+      console.warn("Piper speech failed; using a device voice for the rest:", e);
+      return run === speechRun ? chunks.slice(i).join(" ") : "";
+    }
+    if (run !== speechRun) {
+      URL.revokeObjectURL(url);
+      return "";
+    }
+    next = i + 1 < chunks.length ? fetchPiperAudio(chunks[i + 1], voice) : null;
+    try {
+      await play(url);
+    } catch (e) {
+      console.warn("Piper audio playback failed; using a device voice for the rest:", e);
+      discard(next);
+      return run === speechRun ? chunks.slice(i).join(" ") : "";
+    } finally {
+      finishPlayback = null;
+      URL.revokeObjectURL(url);
+    }
+    if (run !== speechRun) {
+      discard(next);
+      return "";
+    }
   }
+  return "";
 }
 
 async function speakOnDevice(text, voiceURI) {
@@ -246,6 +313,7 @@ async function speakOnDevice(text, voiceURI) {
 }
 
 export function stopSpeaking() {
+  speechRun++; // stops a chunked Piper run before its next chunk
   if (synthesisSupported) speechSynthesis.cancel();
   if (player && !player.paused) player.pause();
   finishPlayback?.(); // pausing doesn't fire "ended", so finish the pending speak() ourselves
