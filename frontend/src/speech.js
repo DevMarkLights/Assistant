@@ -193,15 +193,32 @@ export async function audioSettled() {
 
 // Speaks the text with the voice chosen in Settings, or the given override; resolves when it
 // finishes or is stopped. Piper failures (server down, voice removed) fall back to a device voice.
-export async function speak(text, { engine = savedEngine(), voiceURI, piperVoice = savedPiperVoice() } = {}) {
+// onWord(i) is called with the index (in splitWords(text)) of the word being spoken, for
+// highlighting: exact for device voices that report word boundaries, estimated otherwise.
+export async function speak(text, { engine = savedEngine(), voiceURI, piperVoice = savedPiperVoice(), onWord } = {}) {
   if (!text) return;
   if (engine === "piper" && piperVoice && player) {
-    const unspoken = await speakWithPiper(text, piperVoice);
-    if (!unspoken) return;
+    const { rest, fromWord } = await speakWithPiper(text, piperVoice, onWord);
+    if (!rest) return;
     // Piper failed partway (or at the start): say the rest with a device voice, without repeating
-    return speakOnDevice(unspoken, voiceURI);
+    return speakOnDevice(rest, voiceURI, onWord, fromWord);
   }
-  return speakOnDevice(text, voiceURI);
+  return speakOnDevice(text, voiceURI, onWord, 0);
+}
+
+// The words of a text, the way speech highlighting counts them
+export const splitWords = (text) => text.split(/\s+/).filter(Boolean);
+
+// Which word is playing, `progress` (0-1) of the way through some audio: longer words take longer
+function wordAt(words, progress) {
+  const weights = words.map((w) => w.length + 1);
+  const target = progress * weights.reduce((a, b) => a + b, 0);
+  let sum = 0;
+  for (let i = 0; i < weights.length; i++) {
+    sum += weights[i];
+    if (sum > target) return i;
+  }
+  return words.length - 1;
 }
 
 // Splits text into sentence-sized pieces (about `max` characters), so speech can start after the
@@ -242,14 +259,22 @@ async function fetchPiperAudio(text, voice) {
   return URL.createObjectURL(await res.blob());
 }
 
-function play(url) {
+// Plays one clip; onProgress(0-1) is called every animation frame while it plays
+function play(url, onProgress) {
+  let frame = null;
+  const tick = () => {
+    if (player.duration && Number.isFinite(player.duration)) onProgress?.(player.currentTime / player.duration);
+    frame = requestAnimationFrame(tick);
+  };
   return new Promise((resolve, reject) => {
     finishPlayback = resolve;
     player.onended = () => resolve();
     player.onerror = () => reject(new Error("audio playback failed"));
     player.src = url;
-    player.play().catch(reject);
-  });
+    player.play().then(() => {
+      frame = requestAnimationFrame(tick);
+    }, reject);
+  }).finally(() => cancelAnimationFrame(frame));
 }
 
 // A prefetched chunk that won't be played: release its audio and ignore its errors
@@ -259,9 +284,14 @@ function discard(pending) {
 
 // Generates and plays the text chunk by chunk, fetching the next chunk while the current one plays.
 // Returns "" when done (or stopped), or the text that couldn't be spoken if Piper failed.
-async function speakWithPiper(text, voice) {
+// Returns { rest: "", ... } when done or stopped; if Piper failed, rest is the unspoken text and
+// fromWord the index of its first word in the full text (so highlighting carries on correctly).
+async function speakWithPiper(text, voice, onWord) {
   const run = ++speechRun;
   const chunks = chunkText(text.slice(0, 6000));
+  const chunkWords = chunks.map(splitWords);
+  const firstWord = chunkWords.map((_, i) => chunkWords.slice(0, i).reduce((n, w) => n + w.length, 0));
+  const failed = (i) => (run === speechRun ? { rest: chunks.slice(i).join(" "), fromWord: firstWord[i] } : { rest: "" });
   let next = fetchPiperAudio(chunks[0], voice);
   for (let i = 0; i < chunks.length; i++) {
     let url;
@@ -269,34 +299,41 @@ async function speakWithPiper(text, voice) {
       url = await next;
     } catch (e) {
       console.warn("Piper speech failed; using a device voice for the rest:", e);
-      return run === speechRun ? chunks.slice(i).join(" ") : "";
+      return failed(i);
     }
     if (run !== speechRun) {
       URL.revokeObjectURL(url);
-      return "";
+      return { rest: "" };
     }
     next = i + 1 < chunks.length ? fetchPiperAudio(chunks[i + 1], voice) : null;
     try {
-      await play(url);
+      // Piper gives no word timings: estimate the word from how far through this chunk's audio we are
+      await play(url, (progress) => onWord?.(firstWord[i] + wordAt(chunkWords[i], progress)));
     } catch (e) {
       console.warn("Piper audio playback failed; using a device voice for the rest:", e);
       discard(next);
-      return run === speechRun ? chunks.slice(i).join(" ") : "";
+      return failed(i);
     } finally {
       finishPlayback = null;
       URL.revokeObjectURL(url);
     }
     if (run !== speechRun) {
       discard(next);
-      return "";
+      return { rest: "" };
     }
   }
-  return "";
+  return { rest: "" };
 }
 
-async function speakOnDevice(text, voiceURI) {
+const WORDS_PER_SECOND = 2.7; // typical speaking pace, for voices that don't report word boundaries
+
+// fromWord: index in the full text of this text's first word (non-zero after a Piper fallback)
+async function speakOnDevice(text, voiceURI, onWord, fromWord = 0) {
   if (!synthesisSupported) return;
   await loadVoices();
+  // Character offset where each word starts, to turn boundary events into word indexes
+  const starts = [...text.matchAll(/\S+/g)].map((m) => m.index);
+  let estimate = null;
   return new Promise((resolve) => {
     speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
@@ -306,8 +343,32 @@ async function speakOnDevice(text, voiceURI) {
       utterance.lang = voice.lang;
     }
     utterance.rate = 1.05;
-    utterance.onend = () => resolve();
-    utterance.onerror = () => resolve();
+    let reported = false;
+    utterance.onboundary = (event) => {
+      if (event.name && event.name !== "word") return;
+      reported = true;
+      clearInterval(estimate);
+      let i = 0;
+      while (i + 1 < starts.length && starts[i + 1] <= event.charIndex) i++;
+      onWord?.(fromWord + i);
+    };
+    utterance.onstart = () => {
+      onWord?.(fromWord);
+      // Some voices never report boundaries: estimate from a typical pace instead
+      const began = performance.now();
+      estimate = setInterval(() => {
+        if (reported) return clearInterval(estimate);
+        const elapsed = (performance.now() - began) / 1000;
+        if (elapsed < 0.7) return;
+        onWord?.(fromWord + Math.min(starts.length - 1, Math.floor(elapsed * WORDS_PER_SECOND * utterance.rate)));
+      }, 100);
+    };
+    const finish = () => {
+      clearInterval(estimate);
+      resolve();
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
     speechSynthesis.speak(utterance);
   });
 }

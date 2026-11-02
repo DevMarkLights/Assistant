@@ -110,6 +110,9 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
   - **iOS unlock:** iOS only allows speech and audio after a gesture, so `unlockSpeech()` runs in the tap that opens voice mode. It speaks a silent utterance and plays a silent clip on the shared player.
 - **The overlay:** a full-screen layer over the chat with an orb whose CSS states are idle, listening, thinking, speaking and error. `converse()` loops listen → `sendMessage(text, {voice: true, onEvent})` → `speak(speakable(reply))` → listen again, until closed or nothing is heard.
 - **Tapping the orb:** while listening it ends the utterance, while speaking it interrupts, and when idle it starts again.
+- **Word highlighting:** `speak(text, {onWord})` reports the index, in `splitWords(text)`, of the word being spoken, and `VoiceMode` renders the reply as word spans (current word highlighted, upcoming words dimmed, auto-scrolled into view).
+  - **Device voices:** exact from `onboundary` events. Voices that never send them fall back to a pace estimate (`WORDS_PER_SECOND`).
+  - **Piper:** estimated within each chunk from playback progress, weighted by word length, through `play(url, onProgress)` on every animation frame. Short chunks keep the drift small.
 - **iOS details:**
   - **No audio while opening the mic:** `unlockSpeech(engine)` unlocks only the chosen voice source, and `audioSettled()` waits for that clip to finish, plus 250 ms, before every `listen()`. Starting recognition while audio plays can leave iOS's mic "on" but hearing nothing.
   - **Interim words count:** `listen()` falls back to the last interim words when Safari ends without a final result.

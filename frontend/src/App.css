@@ -1117,6 +1117,27 @@ div.tool-call {
   line-height: 1.5;
 }
 
+/* Words of the reply while it's spoken: current one highlighted, upcoming ones dimmed */
+.voice-reply span {
+  border-radius: 4px;
+  transition: background-color 0.12s ease, opacity 0.12s ease;
+}
+
+.voice-reply .upcoming {
+  opacity: 0.45;
+}
+
+.voice-reply .current {
+  background: color-mix(in srgb, var(--accent) 38%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-reply span {
+    transition: none;
+  }
+}
+
 .voice-error {
   font-size: 14px;
   color: var(--danger);

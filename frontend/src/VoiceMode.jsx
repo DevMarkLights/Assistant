@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { audioSettled, listen, speak, speakable, stopSpeaking } from "./speech";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { audioSettled, listen, speak, speakable, splitWords, stopSpeaking } from "./speech";
 
 const PHASE_LABEL = {
   idle: "Tap to talk",
@@ -18,6 +18,8 @@ export default function VoiceMode({ sendMessage, onClose }) {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [micStage, setMicStage] = useState(null); // what the mic is doing, shown while listening
+  const [spokenWord, setSpokenWord] = useState(-1); // index of the word being spoken, for highlighting
+  const replyRef = useRef(null);
   const closed = useRef(false);
   const recognition = useRef(null);
 
@@ -68,8 +70,10 @@ export default function VoiceMode({ sendMessage, onClose }) {
         return setPhase("error");
       }
 
+      setSpokenWord(-1);
       setPhase("speaking");
-      await speak(speakable(answer)); // resolves early if interrupted, then we listen again
+      // resolves early if interrupted, then we listen again
+      await speak(speakable(answer), { onWord: (i) => !closed.current && setSpokenWord(i) });
     }
   }, [sendMessage]);
 
@@ -90,6 +94,13 @@ export default function VoiceMode({ sendMessage, onClose }) {
     stopSpeaking();
     onClose();
   }, [onClose]);
+
+  // Keep the word being spoken in view in long replies
+  useEffect(() => {
+    if (spokenWord < 0) return;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    replyRef.current?.querySelector(".current")?.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+  }, [spokenWord]);
 
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && close();
@@ -122,7 +133,17 @@ export default function VoiceMode({ sendMessage, onClose }) {
         {phase === "listening" && micStage && !heard && <p className="voice-status">{micStage}</p>}
         {status && <p className="voice-status">{status}</p>}
         {heard && <p className="voice-heard">“{heard}”</p>}
-        {reply && phase !== "listening" && <p className="voice-reply">{reply}</p>}
+        {reply && phase !== "listening" && (
+          <p className="voice-reply" ref={replyRef}>
+            {phase === "speaking"
+              ? splitWords(reply).map((word, i) => (
+                  <Fragment key={i}>
+                    <span className={i < spokenWord ? "spoken" : i === spokenWord ? "current" : "upcoming"}>{word}</span>{" "}
+                  </Fragment>
+                ))
+              : reply}
+          </p>
+        )}
         {error && <p className="voice-error">{error}</p>}
       </div>
     </div>
