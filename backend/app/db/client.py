@@ -18,6 +18,7 @@ sessions = database["sessions"]
 push_subscriptions = database["push_subscriptions"]
 briefs = database["briefs"]
 reminders = database["reminders"]
+brief_sections = database["brief_sections"]
 
 VECTOR_INDEX = "exchange_vector_index"
 FACT_VECTOR_INDEX = "fact_vector_index"
@@ -43,6 +44,7 @@ async def init_db():
     await push_subscriptions.create_index("user_id")
     await reminders.create_index([("status", ASCENDING), ("due_at", ASCENDING)])
     await reminders.create_index([("user_id", ASCENDING), ("status", ASCENDING), ("due_at", ASCENDING)])
+    await brief_sections.create_index([("user_id", ASCENDING), ("position", ASCENDING)])
 
 async def close_db():
     await client.close()

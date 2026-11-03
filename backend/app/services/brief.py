@@ -1,23 +1,25 @@
-# Morning brief: once a day, gather the date, weather, Pi health, and today's reminders, have the
-# background model write a short brief, save it as a new conversation, and push a one-line summary
-# that opens it. Each user gets it at MORNING_BRIEF_TIME in their own timezone (usertime.py), and
-# at most one per local date (db.claim_brief), even across restarts.
+# Morning brief: once a day, gather the user's brief sections (weather, feeds, searches, reminders,
+# server health; see brief_sections.py, which users change by asking in chat), have the background
+# model write a short brief, save it as a new conversation, and push a one-line summary that opens
+# it. Each user gets it at MORNING_BRIEF_TIME in their own timezone (usertime.py), and at most one
+# per local date (db.claim_brief), even across restarts.
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from app import db
-from app.core.config import BRIEF_USERS, HOMELAB_USERS, MEMORY_MODEL, MORNING_BRIEF_TIME
+from app.core.config import BRIEF_USERS, MEMORY_MODEL, MORNING_BRIEF_TIME
 from app.core.logs import get_logger
 from app.llm.client import complete_json
-from app.services import homelab, push, reminders, usertime, weather
+from app.services import brief_sections, push, usertime
 
 log = get_logger("brief")
 
-BRIEF_PROMPT = """You write a user's morning brief from the notes below. Be warm and concise: under
-120 words, plain sentences or a few short bullet points in Markdown. Cover the weather (say if they
-need an umbrella or a jacket), anything wrong with their home server, and today's reminders. Don't
-invent anything that isn't in the notes; leave out a section with nothing in it.
-Respond with JSON only: {"brief": "<the brief>", "summary": "<one line under 90 characters for a phone notification>"}"""
+BRIEF_PROMPT = """You write a user's morning brief from the sections below. Start with a one-line
+greeting that includes the date, then cover each section in the order given, under a short bold
+heading, following its "How to write it" note (by default one to three short sentences or bullets).
+For weather, say if they need an umbrella or a jacket. Every paper, story or search result you
+mention keeps its link: write its title as the Markdown link given in the notes, [Title](url). Don't invent anything that isn't in the notes. A section with nothing in it gets one
+short line saying so, or is left out if it's reminders or the home server. Be concise.
+Respond with JSON only: {"brief": "<the brief, Markdown>", "summary": "<one line under 90 characters for a phone notification>"}"""
 
 CATCH_UP = timedelta(hours=3)  # a brief that's due but missed (server down at 7:00) still goes out until then
 
@@ -34,65 +36,42 @@ def in_brief_window(now: datetime) -> bool:
     return scheduled <= now <= scheduled + CATCH_UP
 
 
-async def reminders_today(user_id: str, now: datetime, tz: ZoneInfo) -> list[str]:
-    """Pending reminders due today, as display lines like "3:00 PM: dentist"."""
-    try:
-        return await reminders.today_lines(user_id, now, tz)
-    except Exception:
-        log.warning("brief reminders failed", exc_info=True)
-        return []
-
-
-async def _pi_health() -> str:
-    report = await homelab.report()
-    lines = report.splitlines()
-    overall = next((l for l in lines if l.startswith("Overall:")), "")
-    if overall == "Overall: healthy":
-        watching = next((l for l in lines if l.startswith("Worth watching:")), "")
-        return "all healthy." + (f" {watching}" if watching else "")
-    return f"problems: {overall.removeprefix('Overall: ')}"
-
-
 async def gather(user: dict, now: datetime) -> dict:
-    """Everything the brief needs, as short notes; `now` is in the user's timezone. Each part fails
-    on its own without stopping the rest."""
-    notes = {"date": now.strftime("%A, %B %-d, %Y")}
-    location = await usertime.user_location(user["id"]) or usertime.default_location()
-    try:
-        notes["weather"] = await weather.forecast(location, days=1)
-    except Exception:
-        log.warning("brief weather failed for %s", location, exc_info=True)
-        notes["weather"] = "Weather is unavailable right now."
-    # Server details are private to the owner: only HOMELAB_USERS ever get them, checked here on
-    # the server, so other users' briefs (and their notifications) never include them
-    if user["username"].lower() in HOMELAB_USERS:
-        try:
-            notes["home_server"] = await _pi_health()
-        except Exception:
-            log.warning("brief Pi health failed", exc_info=True)
-            notes["home_server"] = "Couldn't check the home server."
-    notes["reminders"] = await reminders_today(user["id"], now, now.tzinfo)
-    return notes
+    """The date plus each brief section's notes, in order; `now` is in the user's timezone. Each
+    section fails on its own without stopping the rest."""
+    sections = await brief_sections.sections_for(user["id"], user["username"])
+    gathered = []
+    for section in sections:  # one at a time: Brave allows one search per second
+        gathered.append({"title": section["title"], "type": section["source"]["type"],
+                         "instructions": section["instructions"],
+                         "data": await brief_sections.data_for(section, user, now)})
+    return {"date": now.strftime("%A, %B %-d, %Y"), "sections": gathered}
 
 
 def _fallback(notes: dict) -> dict:
-    """A plain brief for when the model is unavailable (e.g. rate-limited)."""
-    weather_lines = notes["weather"].splitlines()
+    """A plain brief for when the model is unavailable (e.g. rate-limited): each section's first
+    few lines, as they came."""
     parts = [f"Good morning! It's {notes['date']}."]
-    # "Now: ..." and today's "- <date>: ..." forecast line, or the single line of an error message
-    parts += [line.removeprefix("- ") for line in weather_lines if line.startswith(("Now:", "- "))] or weather_lines[:1]
-    if "home_server" in notes:
-        parts.append(f"Home server: {notes['home_server']}")
-    if notes["reminders"]:
-        parts.append("Today: " + "; ".join(notes["reminders"]))
+    for section in notes["sections"]:
+        if section["type"] in ("reminders", "homelab") and section["data"].startswith("("):
+            continue  # "(none today)", "(not available)": nothing worth a heading
+        lines = section["data"].splitlines()
+        if section["type"] == "weather":  # "Now: ..." and today's "- <date>: ..." forecast line
+            lines = [l.removeprefix("- ") for l in lines if l.startswith(("Now:", "- "))] or lines[:1]
+        else:
+            lines = [l for l in lines if not l.startswith("  ")][:3]  # skip feed summaries
+        parts.append(f"**{section['title']}**\n" + "\n".join(lines))
     return {"brief": "\n\n".join(parts), "summary": f"Your brief for {notes['date']}"}
 
 
+def notes_text(notes: dict) -> str:
+    """The gathered sections as the text the model writes from."""
+    return f"Date: {notes['date']}\n\n" + "\n\n".join(
+        f"## {s['title']}\nHow to write it: {s['instructions'] or 'briefly'}\n{s['data']}" for s in notes["sections"])
+
+
 async def write(notes: dict) -> dict:
-    reminders = "\n".join(f"- {r}" for r in notes["reminders"]) or "(none)"
-    text = (f"Date: {notes['date']}\n\nWeather:\n{notes['weather']}\n\n"
-            + (f"Home server: {notes['home_server']}\n\n" if "home_server" in notes else "")
-            + f"Today's reminders:\n{reminders}")
+    text = notes_text(notes)
     try:
         data = await complete_json([{"role": "system", "content": BRIEF_PROMPT},
                                     {"role": "user", "content": text}], model=MEMORY_MODEL, purpose="brief")

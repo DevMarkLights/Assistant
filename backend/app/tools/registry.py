@@ -24,6 +24,7 @@ class ToolContext:
     tz: ZoneInfo = field(default_factory=lambda: ZoneInfo(USER_TIMEZONE))  # the user's own timezone
     calls: list[str] = field(default_factory=list)  # names of tools called this turn
     tool_seconds: float = 0.0  # total time spent running tools this turn
+    offered: set[str] | None = None  # tools sent to the model for this message (groups.py); None = all
 
 
 @dataclass
@@ -56,7 +57,8 @@ class ToolRegistry:
 
     def schemas(self, ctx: ToolContext) -> list[dict]:
         """The tools offered to the model for this user."""
-        return [t.schema() for t in self._tools.values() if t.available(ctx)]
+        return [t.schema() for t in self._tools.values()
+                if t.available(ctx) and (ctx.offered is None or t.name in ctx.offered)]
 
     def running_label(self, name: str) -> str:
         tool = self._tools.get(name)
@@ -90,6 +92,12 @@ class ToolRegistry:
             return f"Error: arguments are not valid JSON ({e})"
         if not isinstance(args, dict):
             return "Error: arguments must be a JSON object"
+        # Models sometimes add arguments the tool doesn't declare (gpt-oss sends {"": ""} to tools
+        # that take none): drop them instead of failing the call
+        declared = tool.parameters.get("properties", {})
+        if extra := [k for k in args if k not in declared]:
+            log.info("%s: ignoring undeclared arguments %s", name, extra)
+            args = {k: v for k, v in args.items() if k in declared}
         try:
             return str(await tool.fn(ctx, **args))
         except TypeError as e:  # missing or unexpected argument

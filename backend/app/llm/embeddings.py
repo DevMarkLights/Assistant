@@ -34,6 +34,17 @@ async def embed(text: str, kind: str = "document") -> list[float]:
     return resp.json()["embeddings"][0]
 
 
+async def embed_many(texts: list[str], kind: str = "document") -> list[list[float]]:
+    """Embeds several texts in one Ollama call."""
+    prefix = "search_query: " if kind == "query" else "search_document: "
+    resp = await _client.post(
+        f"{OLLAMA_URL}/api/embed",
+        json={"model": EMBED_MODEL, "input": [prefix + t for t in texts], "keep_alive": _keep_alive()},
+    )
+    resp.raise_for_status()
+    return resp.json()["embeddings"]
+
+
 async def warm_up() -> None:
     """Loads the embedding model into memory now, so the first chat message doesn't wait for it."""
     try:

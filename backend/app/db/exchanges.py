@@ -5,7 +5,7 @@ from pymongo import ASCENDING
 
 from .client import VECTOR_INDEX, exchanges, keyword_search, now
 
-__all__ = ['add_exchange', 'list_exchanges', 'search_exchanges', 'keyword_search_exchanges']
+__all__ = ['add_exchange', 'list_exchanges', 'last_exchange_embedding', 'search_exchanges', 'keyword_search_exchanges']
 
 
 def _exchange_out(doc: dict) -> dict:
@@ -43,6 +43,13 @@ async def add_exchange(user_id: str, conversation_id: str, user_text: str, assis
 async def list_exchanges(user_id: str, conversation_id: str) -> list[dict]:
     cursor = exchanges.find({"conversation_id": conversation_id, "user_id": user_id}).sort("created_at", ASCENDING)
     return [_exchange_out(doc) async for doc in cursor]
+
+
+async def last_exchange_embedding(user_id: str, conversation_id: str) -> list[float] | None:
+    """The embedding of the conversation's latest exchange (to pick tools for a follow-up)."""
+    doc = await exchanges.find_one({"conversation_id": conversation_id, "user_id": user_id, "embedding": {"$exists": True}},
+                                   {"embedding": 1}, sort=[("created_at", -1)])
+    return doc["embedding"] if doc else None
 
 
 async def search_exchanges(user_id: str, query_vec: list[float], embed_model: str, top_k: int = 4,

@@ -13,14 +13,21 @@ from app.core.config import ENABLE_DOCS
 from app.llm import embeddings
 from app.services import scheduler
 from app.services import tts as tts_service
+from app.tools import groups as tool_groups
+
+
+async def _warm_up():
+    await embeddings.warm_up()
+    await tool_groups.load()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
     scheduler.start()
-    # Load the embedding model and Piper voices in the background so the first replies are fast
-    warm_up = asyncio.create_task(embeddings.warm_up())
+    # Load the embedding model (then embed the tool groups' example phrases) and Piper voices in the
+    # background so the first replies are fast
+    warm_up = asyncio.create_task(_warm_up())
     voices = asyncio.create_task(tts_service.preload())
     yield
     warm_up.cancel()

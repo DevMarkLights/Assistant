@@ -21,6 +21,7 @@ from app.memory import retrieval, titles
 from app.memory import writer as memory_writer
 from app.services import usertime
 from app.services.chat_context import build_messages
+from app.tools import groups as tool_groups
 
 log = get_logger("chat")
 
@@ -56,11 +57,12 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
     user_id = user["id"]
     # Independent lookups run at the same time. Facts: one past the limit, to learn whether the
     # user has more facts than fit in the prompt.
-    conversation, history, query_vec, facts = await asyncio.gather(
+    conversation, history, query_vec, facts, last_vec = await asyncio.gather(
         db.get_conversation(user_id, conversation_id),
         db.list_exchanges(user_id, conversation_id),
         embed(req.message, "query"),
         db.list_facts(user_id, limit=ALL_FACTS_LIMIT + 1),
+        db.last_exchange_embedding(user_id, conversation_id),
     )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -74,23 +76,27 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
         title_task = asyncio.create_task(titles.generate(first_message))
 
     # Second wave, also in parallel: memory search, the user's timezone (reusing the facts just
-    # loaded when they're all there), and the relevant facts if there are too many to send them all
-    memories, tz, relevant_facts = await asyncio.gather(
+    # loaded when they're all there), the relevant facts if there are too many to send them all, and
+    # which tools to send (only the groups this message needs; see tools/groups.py)
+    memories, tz, relevant_facts, tool_choice = await asyncio.gather(
         retrieval.recall_exchanges(user_id, req.message, query_vec, top_k=TOP_K, min_similarity=MIN_SIMILARITY,
                                    exclude_ids=[ex["id"] for ex in recent]),
         usertime.user_zone(user_id, facts if all_facts else None),
         retrieval.recall_facts(user_id, req.message, query_vec, FACT_TOP_K, MIN_SIMILARITY)
         if not all_facts else asyncio.sleep(0, result=None),
+        tool_groups.select(query_vec, last_vec, recent),
     )
     if not all_facts:
         facts = relevant_facts
 
     log.debug("context: %d recent turns, %d facts (all=%s), %d past exchanges",
               len(recent), len(facts), all_facts, len(memories))
-    messages = build_messages(recent, facts, all_facts, memories, req.message, tz, req.voice)
+    messages = build_messages(recent, facts, all_facts, memories, req.message, tz, req.voice, tool_choice.rules)
     setup_seconds = time.perf_counter() - started
 
-    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"], tz=tz)
+    ctx = tools.ToolContext(user_id=user_id, conversation_id=conversation_id, username=user["username"], tz=tz,
+                            offered=tool_choice.tools)
+    log.info("tools offered: %s", ", ".join(tool_choice.reasons))
 
     # Streams newline-delimited JSON events:
     #   {"type": "text", "text": ...}       a piece of the reply

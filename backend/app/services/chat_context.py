@@ -20,24 +20,17 @@ VOICE_PROMPT = """The user is talking to you by voice and your reply will be rea
 short, natural spoken sentences: no Markdown, tables, lists, code, or URLs, and no emoji. Keep it
 brief (a few sentences) unless they ask for detail. Say numbers and times the way people speak them."""
 
-# Appended to SYSTEM_PROMPT when tools are available (Groq path)
-TOOLS_PROMPT = """Use a tool only when the message needs it; otherwise answer directly. The date
-and the user's local time are below, so they never need a tool. Weather with no place given: use
-the user's location from the facts, or ask. Only remember, forget, or cancel a reminder when asked;
-if forget or cancel_reminder returns candidates, ask which one, never guess. remind_me: in_minutes
-for relative times, due_at for specific ones; ask if the time is unclear. Mention sources after a
-web search. Reply only after a tool's result arrives; after remember or forget, say what changed."""
-
-
 def build_messages(recent: list[dict], facts: list[dict], all_facts: bool, memories: list[dict],
-                   user_text: str, tz: ZoneInfo | None = None, voice: bool = False) -> list[dict]:
+                   user_text: str, tz: ZoneInfo | None = None, voice: bool = False,
+                   tool_rules: str = "") -> list[dict]:
     """tz is the user's own timezone (usertime.py); defaults to USER_TIMEZONE. voice: the reply
-    will be read aloud, so ask for short spoken sentences."""
+    will be read aloud, so ask for short spoken sentences. tool_rules: guidance for the tools sent
+    with this message (tools/groups.py); not used with LOCAL, where there are no tools."""
     system = SYSTEM_PROMPT
     if voice:
         system += "\n\n" + VOICE_PROMPT
-    if not LOCAL:
-        system += "\n\n" + TOOLS_PROMPT
+    if not LOCAL and tool_rules:
+        system += "\n\n" + tool_rules
     now = datetime.now(tz or ZoneInfo(USER_TIMEZONE))
     system += f"\n\nToday is {now:%A, %B %-d, %Y}. The user's local time is {now:%-I:%M %p %Z}."
     if all_facts:
