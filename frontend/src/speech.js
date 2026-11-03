@@ -15,35 +15,91 @@ export const MAX_SPEED = 1.5;
 export const recognitionSupported = Boolean(Recognition);
 export const synthesisSupported = "speechSynthesis" in window;
 
-// Listens for one utterance; the browser stops by itself after a pause. Calls onInterim with the
-// words so far, then resolves with the text ("" if nothing was said). If nothing is heard for
-// SILENCE_MS it stops, so the caller can simply listen again. stop() ends it early.
-const SILENCE_MS = 8000;
+// The microphone for a whole voice session: one continuous recognizer that stays on from open()
+// to close(), like a phone call. Turning it off and on each turn made iOS stop delivering audio
+// after a few turns. Words only count while listen() is waiting; anything heard while thinking or
+// speaking (including the assistant's own voice) is ignored. If the browser ends the recognizer by
+// itself, it's restarted right away. onFatal(message) reports errors that need the user (mic not
+// allowed, or no mic); the mic stays off after one.
+const PAUSE_MS = 1200; // this long after the last words, the utterance is done
+const FATAL = new Set(["not-allowed", "service-not-allowed", "audio-capture"]);
 
-export function listen(onInterim) {
-  const recognition = new Recognition();
-  recognition.lang = navigator.language || "en-US";
-  recognition.interimResults = true;
-  recognition.continuous = false;
-  let text = "";
-  const silence = setTimeout(() => recognition.stop(), SILENCE_MS);
-  const done = new Promise((resolve, reject) => {
-    recognition.onresult = (event) => {
-      clearTimeout(silence);
-      text = Array.from(event.results, (result) => result[0].transcript).join("").trim();
-      onInterim?.(text);
+export function openMic(onFatal) {
+  let recognition = null;
+  let closed = false;
+  let results = []; // transcripts from the current recognizer, by result index
+  let from = 0; // first result index that belongs to the current utterance
+  let carried = ""; // words from the current utterance heard by an earlier recognizer
+  let turn = null; // { onInterim, resolve } while listen() is waiting
+  let pause = null;
+  let startedAt = 0;
+
+  const heard = () => [carried, ...results.slice(from)].join(" ").replace(/\s+/g, " ").trim();
+
+  const finishTurn = () => {
+    clearTimeout(pause);
+    if (!turn) return;
+    const { resolve } = turn;
+    const text = heard();
+    turn = null;
+    resolve(text);
+  };
+
+  const start = () => {
+    if (closed) return;
+    const rec = new Recognition();
+    recognition = rec;
+    rec.lang = navigator.language || "en-US";
+    rec.continuous = true;
+    rec.interimResults = true;
+    results = [];
+    from = 0;
+    startedAt = performance.now();
+    rec.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) results[i] = event.results[i][0].transcript;
+      results.length = event.results.length;
+      if (!turn) return;
+      const text = heard();
+      if (!text) return;
+      turn.onInterim?.(text);
+      clearTimeout(pause);
+      pause = setTimeout(finishTurn, PAUSE_MS);
     };
-    recognition.onerror = (event) => {
-      // "no-speech" and "aborted" just mean nothing was said, or we stopped it
-      if (event.error !== "no-speech" && event.error !== "aborted") reject(new Error(errorMessage(event.error)));
+    rec.onerror = (event) => {
+      if (!FATAL.has(event.error)) return; // no-speech, aborted, network: onend restarts it
+      closed = true;
+      onFatal?.(errorMessage(event.error));
+      finishTurn();
     };
-    recognition.onend = () => {
-      clearTimeout(silence);
-      resolve(text);
+    rec.onend = () => {
+      if (recognition !== rec || closed) return;
+      if (turn) carried = heard(); // keep words heard so far in this turn
+      // Ended at once: wait a moment so a failing mic can't restart in a tight loop
+      setTimeout(start, performance.now() - startedAt < 1000 ? 1000 : 0);
     };
-  });
-  recognition.start();
-  return { done, stop: () => recognition.stop(), abort: () => recognition.abort() };
+    rec.start();
+  };
+  start();
+
+  return {
+    // Resolves with the next thing said, once the speaker pauses
+    listen(onInterim) {
+      finishTurn();
+      if (closed) return Promise.resolve("");
+      carried = "";
+      from = results.length; // ignore everything heard before now
+      return new Promise((resolve) => {
+        turn = { onInterim, resolve };
+      });
+    },
+    // End the current turn now with whatever was heard (tapping "done talking")
+    finish: finishTurn,
+    close() {
+      closed = true;
+      finishTurn();
+      recognition?.abort();
+    },
+  };
 }
 
 function errorMessage(code) {
