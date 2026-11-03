@@ -231,10 +231,12 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
         setConversations(list);
         // A notification can link to a conversation (e.g. the morning brief): /Assistant/?c=<id>
         const linked = new URLSearchParams(window.location.search).get("c");
-        if (linked) {
-          window.history.replaceState(null, "", window.location.pathname);
-          if (list.some((c) => c.id === linked)) openConversation(linked);
-        }
+        if (linked) window.history.replaceState(null, "", window.location.pathname);
+        // Otherwise pick up today's chat (the newest one started today, in local time) rather than
+        // starting a new one. The list is newest first.
+        const today = new Date().toDateString();
+        const open = list.find((c) => c.id === linked) ?? list.find((c) => new Date(c.created_at).toDateString() === today);
+        if (open) openConversation(open.id);
       })
       .catch((e) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
