@@ -25,9 +25,6 @@ EXCERPT_CHARS = 300  # each side of a past-conversation excerpt
 # How long Ollama keeps the embedding model loaded after a call: -1 = always (the default here),
 # or a duration like "24h". Ollama's own default of 5 minutes means slow reloads on the Pi.
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "-1")
-# Hidden reasoning before gpt-oss writes its first visible word: low, medium, or high (Groq's
-# default is medium). Lower is faster and uses fewer tokens. Only sent to gpt-oss models.
-REASONING_EFFORT = os.getenv("REASONING_EFFORT", "low")
 # Tool-calling rounds per message before the model must answer without tools (Groq only)
 MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "5"))
 MIN_SIMILARITY = float(os.getenv("MIN_SIMILARITY", "0.5"))
@@ -41,14 +38,8 @@ RECENCY_HALF_LIFE_DAYS = float(os.getenv("RECENCY_HALF_LIFE_DAYS", "30"))
 # Users with at most this many facts get all of them in every prompt; above it, only the most similar
 ALL_FACTS_LIMIT = int(os.getenv("ALL_FACTS_LIMIT", "100"))
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-GROQ_URL = os.getenv("GROQ_URL")
-# Groq limits are per model, so background memory work can use its own budget
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", GROQ_MODEL)
-# Tried in order when GROQ_MODEL is rate-limited (comma-separated; empty = no fallback)
-GROQ_FALLBACK_MODELS = [m.strip() for m in os.getenv("GROQ_FALLBACK_MODELS", "openai/gpt-oss-20b").split(",")
-                        if m.strip() and m.strip() != GROQ_MODEL]
+# Cloud LLM providers, models and per-task routing live in models.yaml (app/llm/providers.py); their
+# API keys stay here in .env (e.g. GROQ_API_KEY), named by each provider's key_env.
 
 # Web search (Brave Search API). Without a key the web_search tool isn't offered to the model.
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")

@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ValidationError
 
 from app import db
-from app.core.config import EMBED_MODEL, MEMORY_MODEL
+from app.core.config import EMBED_MODEL
 from app.llm.embeddings import embed
 from app.llm.client import complete_json
 from app.core.logs import get_logger
@@ -83,7 +83,7 @@ async def extract_facts(user_text: str, assistant_text: str) -> list[ExtractedFa
         {"role": "system", "content": EXTRACT_PROMPT},
         {"role": "user", "content": f"User: {user_text}\nAssistant: {assistant_text}"},
     ]
-    data = await complete_json(messages, model=MEMORY_MODEL, purpose="memory-extract")
+    data = await complete_json(messages, task="background_json", purpose="memory-extract")
     try:
         return Extraction.model_validate(data).facts
     except ValidationError as e:
@@ -115,7 +115,7 @@ async def decide(fact: ExtractedFact, similar: list[dict]) -> Decision:
         {"role": "system", "content": DECIDE_PROMPT},
         {"role": "user", "content": f"EXISTING facts:\n{listing}\n\nNEW fact: {fact.text}"},
     ]
-    data = await complete_json(messages, model=MEMORY_MODEL, purpose="memory-decide")
+    data = await complete_json(messages, task="background_json", purpose="memory-decide")
     try:
         return Decision.model_validate(data)
     except ValidationError as e:

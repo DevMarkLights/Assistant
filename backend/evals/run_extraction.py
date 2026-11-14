@@ -2,8 +2,8 @@
 # output against the expected facts, so a prompt or model change gives a number, not a guess.
 #
 # Run from backend/:
-#   ../.venv/bin/python evals/run_extraction.py                      # current prompt and MEMORY_MODEL
-#   ../.venv/bin/python evals/run_extraction.py --model openai/gpt-oss-120b
+#   ../.venv/bin/python evals/run_extraction.py                      # current prompt, background_json's first model
+#   ../.venv/bin/python evals/run_extraction.py --model gpt-oss-120b  # a model name from models.yaml
 #   ../.venv/bin/python evals/run_extraction.py --prompt my_prompt.txt --label "stricter rules"
 #   ../.venv/bin/python evals/run_extraction.py --fake               # check the scorer, no API calls
 #
@@ -27,9 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # import backend modules
 
-from app.llm import client as llm  # noqa: E402
+from app.llm import providers, router  # noqa: E402
+from app.llm.client import RateLimitError  # noqa: E402
 from app.memory import writer as memory_writer  # noqa: E402
-from groq import RateLimitError  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results.csv"
@@ -74,7 +74,7 @@ async def extract(case: dict, fake: bool) -> list[str]:
 
 async def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default=memory_writer.MEMORY_MODEL, help="model to evaluate (default: MEMORY_MODEL)")
+    parser.add_argument("--model", help="a model name from models.yaml (default: background_json's first model)")
     parser.add_argument("--prompt", type=Path, help="file with an extraction prompt to try instead of EXTRACT_PROMPT")
     parser.add_argument("--cases", type=Path, default=HERE / "extraction_cases.json")
     parser.add_argument("--label", default="", help="note saved with this run, e.g. 'shorter prompt'")
@@ -84,19 +84,25 @@ async def main():
     args = parser.parse_args()
 
     logging.getLogger("assistant").setLevel(logging.WARNING)
-    memory_writer.MEMORY_MODEL = args.model
+    # Every background_json call in this run goes to the chosen model only
+    task = providers.config.tasks["background_json"]
+    if args.model:
+        if args.model not in providers.config.models:
+            sys.exit(f"unknown model {args.model!r}; models.yaml has: {', '.join(providers.config.models)}")
+        task.models = [providers.config.models[args.model]]
+    args.model = router.candidates("background_json")[0].label
     if args.prompt:
         memory_writer.EXTRACT_PROMPT = args.prompt.read_text()
     prompt_id = hashlib.sha1(memory_writer.EXTRACT_PROMPT.encode()).hexdigest()[:8]
 
     tokens = 0
-    real_log_usage = llm.log_usage
-    def counting_log_usage(purpose, model, usage):
+    real_served = router.served
+    def counting_served(task_name, model, purpose, usage):
         nonlocal tokens
-        used = real_log_usage(purpose, model, usage)
+        used = real_served(task_name, model, purpose, usage)
         tokens += used
         return used
-    llm.log_usage = counting_log_usage
+    router.served = counting_served
 
     cases = json.loads(args.cases.read_text())
     print(f"model={'fake' if args.fake else args.model}  prompt={prompt_id}  cases={len(cases)}\n")

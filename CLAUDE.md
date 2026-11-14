@@ -34,9 +34,9 @@ Piper voices for voice mode are ~60 MB model files kept out of git in `backend/p
 There are no unit tests. There is an extraction eval, run from `backend/`:
 
 ```bash
-../.venv/bin/python evals/run_extraction.py                    # current EXTRACT_PROMPT on MEMORY_MODEL (~8K tokens)
+../.venv/bin/python evals/run_extraction.py                    # current EXTRACT_PROMPT on background_json's first model (~8K tokens)
 ../.venv/bin/python evals/run_extraction.py --prompt p.txt --label "stricter"   # try a prompt from a file
-../.venv/bin/python evals/run_extraction.py --model openai/gpt-oss-120b         # try another model
+../.venv/bin/python evals/run_extraction.py --model gpt-oss-120b                 # try another model (a name from models.yaml)
 ../.venv/bin/python evals/run_extraction.py --fake             # check the scorer itself; no API calls
 ../.venv/bin/python evals/run_tool_groups.py                   # which tool groups messages get (Ollama only, no Groq tokens)
 ```
@@ -51,7 +51,7 @@ It scores `memory_writer.extract_facts` on `evals/extraction_cases.json` (20 exc
 - `app/core/`: `config.py` (all settings from `.env`) and `logs.py`.
 - `app/db/`: MongoDB. `client.py` holds the connection, collection handles and `init_db` indexes, and there's one module per collection (`conversations`, `exchanges`, `facts`, `users`, `reminders`, `briefs`, `push`). `app/db/__init__.py` re-exports their functions, so callers write `from app import db` and `db.add_fact(...)`. Raw collection handles are on `db.client`, for scripts and tests.
 - `app/api/`: HTTP routes only (`auth`, `chat`, `memory`, `push`, `brief`, `tts`, `health`), with request models in `schemas.py`.
-- `app/llm/`: `client.py` (Groq/Ollama, the tool loop, fallback, token logging) and `app/llm/embeddings.py`.
+- `app/llm/`: `client.py` (Ollama or cloud models, the tool loop, fallback), `providers.py` and `router.py` (which provider and model serve each request, from `backend/models.yaml`), and `embeddings.py`.
 - `app/memory/`: `writer.py` (fact extraction and reconcile), `retrieval.py` (hybrid search) and `titles.py`.
 - `app/tools/`: `registry.py` (`ToolRegistry`, `ToolContext`), plus one module per tool group (`clock`, `memory`, `weather`, `web`, `homelab`, `reminders`, `brief`), and `groups.py`, which picks the tools sent with each message. Importing `app.tools` registers them, in the order listed in its `__init__.py`.
 - `app/services/`: the logic behind routes, tools and jobs: `chat_context` (builds what the model sees, with the system, tools and voice prompts), `weather`, `websearch`, `homelab`, `push`, `reminders`, `brief`, `brief_sections`, `feeds`, `usertime`, `tts` and `scheduler`.
@@ -63,7 +63,7 @@ It scores `memory_writer.extract_facts` on `evals/extraction_cases.json` (20 exc
 
 **Configuration** comes from `backend/.env` through `app/core/config.py`. `LOCAL` is required (the app crashes on startup if it's unset). It selects the chat LLM:
 - `LOCAL=true`: Ollama at `OLLAMA_URL` using `CHAT_MODEL`
-- `LOCAL=false`: Groq using `GROQ_MODEL` (needs `GROQ_API_KEY`)
+- `LOCAL=false`: cloud models chosen by the model router from `backend/models.yaml` (see **Model router**); provider API keys such as `GROQ_API_KEY` stay in `.env`. `backend/.env.example` lists every setting.
 
 Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`), so Ollama must be running in both modes. `embeddings.embed()` adds the nomic `search_query:` / `search_document:` prefixes based on `kind`, so pass `"query"` when searching and `"document"` when storing.
 
@@ -103,7 +103,7 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 - **Feeds and private addresses:** feed URLs come from users, so `feeds.fetch` only fetches public http(s) hosts. Loopback, private and link-local addresses (the Pi's own services, the home network) are refused, re-checked on every redirect, with a 3 MB size cap. It parses RSS 2.0, RSS 1.0/RDF and Atom with the standard library's ElementTree (bundled expat 2.7 guards against entity-expansion attacks).
 - **Showing it in chat:** `get_morning_brief` gathers the sections now and returns them for the chat model to write up, so "what's my brief?" uses real content. Without it the model invented papers and news, so the brief group's rules say never to write a brief itself, and the core rules say never to make up news, papers or links.
 - **Links:** `feeds.format_items` gives each item as `- [Title](link)` plus a ~110-character summary (arXiv's "arXiv:… Announce Type: new Abstract:" prefix stripped), so models keep links by default; `BRIEF_PROMPT` also requires them.
-- **Writing it:** sections are gathered one at a time (Brave allows 1 search/second), each capped at `DATA_CHARS`; a failing source becomes a one-line note. Then a single `MEMORY_MODEL` call writes `{brief, summary}` from all the sections, following each section's instructions. Eight feed items fit in a section's 2,000-character cap; a brief with three feeds is about 2K tokens of input. If the model fails, `_fallback()` lists each section's first lines instead.
+- **Writing it:** sections are gathered one at a time (Brave allows 1 search/second), each capped at `DATA_CHARS`; a failing source becomes a one-line note. Then a single `morning_brief` task call writes `{brief, summary}` from all the sections, following each section's instructions. Eight feed items fit in a section's 2,000-character cap; a brief with three feeds is about 2K tokens of input. If the model fails, `_fallback()` lists each section's first lines instead.
 - **Saving it:** it's saved as a "Morning brief, <Mon D>" conversation containing one assistant-only exchange: `user_text=""`, no embedding, `embed_model="none"`, so it never appears in retrieval. Then a push is sent with `url=/Assistant/?c=<id>`, which `Chat.jsx` opens.
 - **Once per day:** `db.claim_brief` inserts a `briefs` document whose `_id` is `<user_id>:<YYYY-MM-DD>`. A failure *before* sending releases the claim so the brief can be retried; after the conversation is saved it counts as sent, so it's never sent twice.
 - **Manual trigger:** `POST /Assistant/api/brief/run` (with `?force=true` for testing) creates the brief now. Settings has a button for it.
@@ -152,7 +152,7 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 - **Index lag:** Atlas's vector index lags writes by a few seconds while `$text` doesn't. Tests that insert and then search immediately must wait for the vector index to catch up.
 - **Limit:** keyword search can't link an acronym ("OMSCS") to a fact that only spells it out.
 
-**Titles** (`app/memory/titles.py`): when a chat has no title, `chat` starts a `MEMORY_MODEL` title task from the chat's first message alongside the reply. When the reply is done it saves the title with `set_title_if_empty`, which won't overwrite a rename made in the meantime, and emits a `title` event that `Chat.jsx` applies to the sidebar.
+**Titles** (`app/memory/titles.py`): when a chat has no title, `chat` starts a title request (the `titles` task) from the chat's first message alongside the reply. When the reply is done it saves the title with `set_title_if_empty`, which won't overwrite a rename made in the meantime, and emits a `title` event that `Chat.jsx` applies to the sidebar.
 
 **Speed** (the Pi is slow, so these matter):
 - **Embeddings:** `app/llm/embeddings.py` sends `keep_alive` (`OLLAMA_KEEP_ALIVE`, default `-1`, meaning forever) with every Ollama call, and `main.py` warms the model up at startup. Ollama's own default unloads the model after 5 idle minutes, and reloading it on the Pi's 4 cores cost seconds per message. One shared `httpx` client reuses connections.
@@ -160,8 +160,8 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
   - **History:** `fit_history` caps it at `HISTORY_TOKENS` (1500). The latest reply is kept up to `LATEST_REPLY_CHARS`, older replies are cut to `OLDER_REPLY_CHARS`, and past-conversation excerpts to `EXCERPT_CHARS`.
   - **Tool text:** only the tool groups a message needs are sent (see **Tool groups** below), and tool descriptions and group rules are kept terse.
   - **Result:** in testing, the worst-case request went from about 7,400 tokens to about 2,450.
-- **No silent retries on chat:** chat calls use `llm.chat_client` (`max_retries=0`). The SDK's own retry waits for Groq's retry-after on a 429, up to a minute, which produced 65-second replies. The tool loop handles errors itself instead: a rate limit moves to the next model in `CHAT_MODELS`, and a `TRANSIENT` (connection or 5xx) error is retried once after 1 second. Background calls keep the SDK's two retries.
-- **Reasoning:** `llm.model_options` sends `reasoning_effort` (`REASONING_EFFORT`, default `low`) to gpt-oss models on every call, chat and background alike. Hidden reasoning delays the first visible word and uses tokens.
+- **No silent retries on chat:** each provider's chat `client` has `max_retries=0`. The SDK's own retry waits for the retry-after on a 429, up to a minute, which produced 65-second replies. The tool loop handles errors itself instead: a rate limit moves to the `chat_tools` task's next model, and a `TRANSIENT` (connection or 5xx) error is retried once after 1 second. Background calls (`background_client`) keep the SDK's two retries.
+- **Reasoning:** each model's `options` in `models.yaml` are sent with every call; the gpt-oss models have `reasoning_effort: low`. Hidden reasoning delays the first visible word and uses tokens.
 - **Parallel setup:** `chat` runs its lookups in two `asyncio.gather` waves (about 60–100 ms instead of about 300 ms in testing). First the conversation, history, query embedding and facts; then memory search, the timezone (reusing the facts already loaded) and fact search. `recall_*` runs its vector and keyword searches concurrently too.
 - **Background save:** the stream closes as soon as the reply (and any title) is done. Embedding and saving the exchange, then memory extraction, happen afterwards in `_save_exchange` via `_spawn`, so the send box unlocks right away. A failed save is logged.
 - **Timing log:** each message logs `assistant.chat: timing: first text after Xs, done in Ys (setup Zms, tools Ts, <tools used>)`. `ToolContext.tool_seconds` adds up the time spent in tools.
@@ -181,6 +181,12 @@ Embeddings always go through Ollama (`EMBED_MODEL`, default `nomic-embed-text`),
 Memory changes and failures are logged under `assistant.memory`.
 
 **Logging:** use `log = get_logger("<area>")` from `app/core/logs.py`, not `print`. It gives named loggers under `assistant.*` (chat, llm, tools, memory) with timestamped lines on stderr, which systemd sends to journald. Set the level with `LOG_LEVEL` in `.env`; `DEBUG` adds per-message retrieval counts and retract notices. Use `log.exception` inside `except` blocks to include the traceback. The `assistant` logger doesn't propagate, so uvicorn's access log stays separate.
+
+**Model router** (`app/llm/providers.py`, `app/llm/router.py`, config in `backend/models.yaml`). Stage 1 of 4 (later: rate-limit tracking, routing and failover across providers, a usage page):
+- **Config, not code:** `models.yaml` defines providers (`base_url`, `key_env`, `allow_personal_data`, `policy_url`), models (provider, `id`, `capabilities`: tools/json_mode/vision/context_length, `limits`: rpm/tpm/rpd/tpd, `options`) and tasks (`personal_data`, `needs`, ordered `models`). The tasks are `chat_tools`, `background_json` (memory extraction and decisions), `titles` and `morning_brief`. It's loaded once at import (restart after editing); `MODELS_CONFIG` can point elsewhere.
+- **One client type:** every provider is an `openai.AsyncOpenAI` with its own `base_url` and key (Groq: `https://api.groq.com/openai/v1`). The `groq` SDK is gone. Providers without a key are skipped; startup fails if a task has no model with a key.
+- **Personal data:** a provider gets tasks with `personal_data: true` (everything except `titles`) only if `allow_personal_data: true`. It defaults to false; Groq was approved by the owner on 2026-11-13. Never set it for a new provider without the owner reviewing its `policy_url`.
+- **Router:** `router.candidates(task)` returns the task's models that have its `needs`, may receive its data and have a key. `router.served(...)` logs every request with task, purpose, provider/model and tokens. `client.py` keeps `chat_stream` and `complete_json(messages, task=...)` as the only entry points, and `RateLimitError` is re-exported from there so nothing else imports a provider SDK.
 
 **Tool groups** (`app/tools/groups.py`): every tool schema costs tokens on every request, so a message gets only the groups it needs (all tools together were ~1,360 tokens; a typical message now sends ~470–620):
 - **Core**, always: `get_current_time`, `remember`, `forget`, `web_search`. Web search is core because open-ended lookups ("population of Japan") are too varied to match reliably, and a missed search means a stale answer. `CORE_RULES` holds the general tool guidance, including "if you'd need a tool you don't have here, say so; never make up results, news, papers or links".
@@ -206,10 +212,10 @@ Memory changes and failures are logged under `assistant.memory`.
 - **Per-user tools:** `@registry.tool(available=lambda ctx: ...)` limits a tool to certain users. `registry.schemas(ctx)` only offers allowed tools, and `call` refuses others. `homelab_stats` is limited to the usernames in `HOMELAB_USERS`, because it exposes the host's details.
 - **Date in the prompt:** `build_messages` adds today's date and the server time, so date questions don't need a tool. The Pi's timezone (`timedatectl`) must be right.
 - **Rate limits:** on Groq's free tier each model has its own limits: 30 requests/min, 1K/day, 8K tokens/min and 200K/day for `gpt-oss-120b`, `gpt-oss-20b` and `qwen3.8-27b`.
-  - **Fallback:** chat uses `GROQ_MODEL`. On a `RateLimitError` the tool loop retries the same round on the next model in `GROQ_FALLBACK_MODELS` (default `openai/gpt-oss-20b`) and stays on it for the rest of the message. Only when every model is limited is the error shown to the user, with Groq's retry time.
-  - **Background memory:** extraction and merge decisions use `MEMORY_MODEL` via `complete_json(..., model=...)`, so they don't use up the main chat model's budget.
-  - **Token logging:** every Groq request logs its usage as `assistant.llm: <purpose> <model>: N in + M out`, and each chat message logs a total. Streamed usage arrives on the last chunk (`x_groq.usage`), which can have no `choices`.
-  - **Testing:** test with a fake `llm.groq_client`, not live calls; live runs eat into the user's small budget.
+  - **Fallback:** chat uses the `chat_tools` task's models in order (gpt-oss-120b, then gpt-oss-20b). On a `RateLimitError` the tool loop retries the same round on the next model and stays on it for the rest of the message. Only when every model is limited is the error shown to the user, with Groq's retry time.
+  - **Background work:** extraction and merge decisions (`background_json`), titles and the brief call `complete_json(messages, task=...)`; their tasks use gpt-oss-20b, so they don't use up the chat model's budget.
+  - **Token logging:** every request logs `assistant.llm: router: <task> (<purpose>) served by <provider>/<model>: N in + M out = T tokens`, and each chat message logs a total. Groq sends streamed usage on the last chunk as `x_groq.usage` (a dict through the `openai` client), which can have no `choices`.
+  - **Testing:** replace a provider's clients with fakes (`providers.config.providers["groq"].client = background_client = fake`), not live calls; live runs eat into the user's small budget.
 - **Background extraction is skipped** when `remember` or `forget` ran in a turn. Otherwise the extractor could undo the change, for example by saving "the user wants to forget X".
 
 Frontend: `App.jsx` checks `/auth/me` on load and renders either `Login.jsx` or `Chat.jsx`. `Chat.jsx` holds the conversation sidebar and the chat pane, which renders replies with `react-markdown`. On load it opens the chat linked by `?c=<id>` (from a notification), or else the newest chat started today in the browser's local time (a morning brief counts), or else starts on a new chat. Its `api()` wrapper returns the user to the login screen on any 401, and it's passed down to `Memory.jsx`, the fact list (with in-browser word-start search) and delete UI that the sidebar's "Memory" button swaps into the main pane. Styling: `index.css` defines the theme as CSS variables (dark by default; `data-theme="light"` on `<html>` switches to light, toggled with `theme.js` and stored in localStorage). Use those variables, not hard-coded colors. At 768px or narrower, `App.css` turns the sidebar into an overlay drawer controlled by the `sidebar-open` class on `.app`.

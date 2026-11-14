@@ -8,14 +8,13 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from groq import RateLimitError
 
 from app import db, tools
 from app.api.auth import current_user
 from app.api.schemas import ChatRequest, ExchangeIn, TitleUpdate
 from app.core.config import ALL_FACTS_LIMIT, EMBED_MODEL, FACT_TOP_K, HISTORY_TURNS, MIN_SIMILARITY, TOP_K
 from app.core.logs import get_logger
-from app.llm.client import chat_stream
+from app.llm.client import RateLimitError, chat_stream
 from app.llm.embeddings import embed
 from app.memory import retrieval, titles
 from app.memory import writer as memory_writer
@@ -135,7 +134,7 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
                     if out := event(piece):
                         yield out
         except RateLimitError as e:
-            log.warning("Groq rate limit: %s", e)
+            log.warning("rate limit on every chat model: %s", e)
             # Groq says when to retry, e.g. "Please try again in 7m38.784s"
             wait = re.search(r"try again in ((?:\d+h)?(?:\d+m)?)([\d.]+s)?", str(e))
             if wait and wait.group(1):

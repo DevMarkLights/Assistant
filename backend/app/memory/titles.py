@@ -1,6 +1,5 @@
-# Short auto-generated conversation titles, made from the conversation's first message with the
-# (cheaper) MEMORY_MODEL while the reply streams.
-from app.core.config import MEMORY_MODEL
+# Short auto-generated conversation titles, made from the conversation's first message (the "titles"
+# task in models.yaml) while the reply streams.
 from app.llm.client import complete_json
 from app.core.logs import get_logger
 
@@ -18,7 +17,7 @@ async def generate(first_message: str) -> str | None:
         {"role": "user", "content": first_message[:1000]},
     ]
     try:
-        data = await complete_json(messages, model=MEMORY_MODEL, purpose="title")
+        data = await complete_json(messages, task="titles", purpose="title")
     except Exception:
         log.warning("title generation failed", exc_info=True)
         return None

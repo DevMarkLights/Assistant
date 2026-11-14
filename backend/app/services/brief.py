@@ -6,7 +6,7 @@
 from datetime import datetime, timedelta
 
 from app import db
-from app.core.config import BRIEF_USERS, MEMORY_MODEL, MORNING_BRIEF_TIME
+from app.core.config import BRIEF_USERS, MORNING_BRIEF_TIME
 from app.core.logs import get_logger
 from app.llm.client import complete_json
 from app.services import brief_sections, push, usertime
@@ -74,7 +74,7 @@ async def write(notes: dict) -> dict:
     text = notes_text(notes)
     try:
         data = await complete_json([{"role": "system", "content": BRIEF_PROMPT},
-                                    {"role": "user", "content": text}], model=MEMORY_MODEL, purpose="brief")
+                                    {"role": "user", "content": text}], task="morning_brief", purpose="brief")
         brief, summary = str(data.get("brief") or "").strip(), str(data.get("summary") or "").strip()
         if brief:
             return {"brief": brief, "summary": summary[:120] or f"Your brief for {notes['date']}"}

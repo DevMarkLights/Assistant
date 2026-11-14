@@ -1,0 +1,51 @@
+# LLM providers, models, and which models each task uses (loaded by app/llm/providers.py at
+# startup; restart after editing). API keys stay in .env: each provider names its key's env var.
+# With LOCAL=true none of this is used: everything goes to Ollama (CHAT_MODEL).
+#
+# allow_personal_data: may this provider receive personal data (chat, memory extraction and
+# decisions, the morning brief)? Defaults to false when left out. Review the provider's data and
+# training policy (policy_url) before setting it to true.
+
+providers:
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+    allow_personal_data: true  # approved by the owner, 2026-11-13
+    policy_url: https://console.groq.com/docs/your-data
+
+# Each model: its provider, the id the provider expects, what it can do, its free-tier limits
+# (per minute / per day: requests and tokens; null = no limit), and extra request options.
+models:
+  gpt-oss-120b:
+    provider: groq
+    id: openai/gpt-oss-120b
+    capabilities: {tools: true, json_mode: true, vision: false, context_length: 131072}
+    limits: {rpm: 30, tpm: 8000, rpd: 1000, tpd: 200000}
+    options: {reasoning_effort: low}  # hidden reasoning delays the first word and uses tokens
+  gpt-oss-20b:
+    provider: groq
+    id: openai/gpt-oss-20b
+    capabilities: {tools: true, json_mode: true, vision: false, context_length: 131072}
+    limits: {rpm: 30, tpm: 8000, rpd: 1000, tpd: 200000}
+    options: {reasoning_effort: low}
+
+# Each task: whether it sends personal data, the capabilities it needs, and its models in order
+# of preference. Groq's limits are per model, so background work uses a different model from chat
+# and doesn't eat into chat's budget.
+tasks:
+  chat_tools:  # the chat reply, streamed, with tool calling
+    personal_data: true
+    needs: [tools]
+    models: [gpt-oss-120b, gpt-oss-20b]
+  background_json:  # memory extraction and memory decisions (JSON mode)
+    personal_data: true
+    needs: [json_mode]
+    models: [gpt-oss-20b]
+  titles:  # a chat's title from its first message
+    personal_data: false
+    needs: [json_mode]
+    models: [gpt-oss-20b]
+  morning_brief:
+    personal_data: true
+    needs: [json_mode]
+    models: [gpt-oss-20b]

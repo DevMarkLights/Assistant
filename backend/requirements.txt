@@ -1,7 +1,8 @@
 fastapi[standard]
 httpx
 numpy
-groq
+openai>=1.40
+pyyaml
 pymongo
 pwdlib[argon2]
 pywebpush

@@ -1,64 +1,37 @@
-# Streaming LLM client that routes to Ollama (local) or Groq (cloud) based on the LOCAL config flag.
-# The Groq path can also run a tool-calling loop; Ollama is plain chat. Chat falls back to
-# GROQ_FALLBACK_MODELS when GROQ_MODEL is rate-limited, and every Groq request logs its token usage.
+# Streaming LLM client. With LOCAL=true everything goes to Ollama (plain chat and JSON). Otherwise
+# each request names a task, the router (router.py, models.yaml) picks its provider and model, and
+# every provider is reached through the same OpenAI-compatible client. Chat falls back to the task's
+# next model when one is rate-limited, and every request is logged with its provider, model and tokens.
 import asyncio
 import json
-from groq import APIConnectionError, APIError, AsyncGroq, InternalServerError, RateLimitError
 
 import httpx
+from openai import APIConnectionError, APIError, InternalServerError, RateLimitError  # noqa: F401 (re-exported)
 
-from app.core.config import (CHAT_MODEL, GROQ_API_KEY, GROQ_FALLBACK_MODELS, GROQ_MODEL, LOCAL, MAX_TOOL_ROUNDS,
-                    OLLAMA_URL, REASONING_EFFORT)
+from app.core.config import CHAT_MODEL, LOCAL, MAX_TOOL_ROUNDS, OLLAMA_URL
 from app.core.logs import get_logger
+from app.llm import router
 
 log = get_logger("llm")
 
 TIMEOUT = httpx.Timeout(120.0, connect=5.0)
-
-groq_client = None
-if not LOCAL:
-    if not GROQ_API_KEY:
-        raise RuntimeError("LOCAL=false requires GROQ_API_KEY in .env")
-    groq_client = AsyncGroq(api_key=GROQ_API_KEY, timeout=TIMEOUT, max_retries=2)
-
-# Chat requests must not use the SDK's automatic retries: on a rate limit it quietly waits for
-# Groq's retry-after (up to a minute) before trying again, which looked like a 65-second reply.
-# The chat loop handles errors itself instead: rate limit -> next model, server error -> one retry.
-chat_client = groq_client.with_options(max_retries=0) if groq_client else None
 TRANSIENT = (APIConnectionError, InternalServerError)
-
-CHAT_MODELS = [GROQ_MODEL, *GROQ_FALLBACK_MODELS]
-
-
-def model_options(model: str) -> dict:
-    """Extra request options for a model: reasoning effort applies to gpt-oss models only."""
-    return {"reasoning_effort": REASONING_EFFORT} if REASONING_EFFORT and "gpt-oss" in model else {}
+CHAT_TASK = "chat_tools"
 
 
 def _chunk_usage(chunk):
-    """Groq reports token usage on the last streamed chunk, in x_groq.usage."""
-    return chunk.usage or (chunk.x_groq.usage if chunk.x_groq else None)
-
-
-def log_usage(purpose: str, model: str, usage) -> int:
-    """Logs one request's token usage; returns its total so callers can add it up."""
-    if not usage:
-        return 0
-    log.info("%s %s: %d in + %d out = %d tokens", purpose, model,
-             usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-    return usage.total_tokens
+    """A streamed chunk's token usage: the standard field, or Groq's x_groq.usage on the last chunk."""
+    if chunk.usage:
+        return chunk.usage
+    extra = getattr(chunk, "x_groq", None)
+    return extra.get("usage") if isinstance(extra, dict) else getattr(extra, "usage", None)
 
 
 async def chat_stream(messages: list[dict], tools=None, ctx=None):
-    """Yields reply text (str). With a tool registry on the Groq path, runs the tool loop and also
+    """Yields reply text (str). With a tool registry (cloud models only), runs the tool loop and also
     yields dict events: {"type": "tool_start", ...}, {"type": "tool_end", ...}, and
     {"type": "retract", "chars": n}, meaning the last n characters of text should be dropped."""
-    if LOCAL:
-        stream = _ollama_stream(messages)
-    elif tools is not None:
-        stream = _groq_tool_loop(messages, tools, ctx)
-    else:
-        stream = _groq_stream(messages)
+    stream = _ollama_stream(messages) if LOCAL else _tool_loop(messages, tools, ctx)
 
     async for piece in stream:
         yield piece
@@ -85,34 +58,7 @@ async def _ollama_stream(messages: list[dict]):
                 if chunk.get("done"):
                     break
 
-async def _groq_stream(messages: list[dict]):
-    if groq_client is None:
-        raise RuntimeError("GROQ_API_KEY is not set in .env")
-
-    for i, model in enumerate(CHAT_MODELS):
-        try:
-            try:
-                stream = await chat_client.chat.completions.create(model=model, messages=messages, stream=True,
-                                                                   **model_options(model))
-            except TRANSIENT:
-                await asyncio.sleep(1)
-                stream = await chat_client.chat.completions.create(model=model, messages=messages, stream=True,
-                                                                   **model_options(model))
-            break
-        except RateLimitError:
-            if i + 1 == len(CHAT_MODELS):
-                raise
-            log.warning("%s is rate-limited, falling back to %s", model, CHAT_MODELS[i + 1])
-    async for chunk in stream:
-        log_usage("chat", model, _chunk_usage(chunk))
-        if not chunk.choices:
-            continue
-        piece = chunk.choices[0].delta.content
-        if piece:
-            yield piece
-
-
-async def _groq_tool_loop(messages: list[dict], registry, ctx):
+async def _tool_loop(messages: list[dict], registry, ctx):
     messages = list(messages)
     requests, tokens = 0, 0
     try:
@@ -127,24 +73,26 @@ async def _groq_tool_loop(messages: list[dict], registry, ctx):
 
 
 async def _tool_rounds(messages: list[dict], registry, ctx):
+    models = router.candidates(CHAT_TASK)
     rounds, model_index, retried = 0, 0, False
     while True:
-        model = CHAT_MODELS[model_index]
+        model = models[model_index]
         # Out of rounds: one last call with tools disabled so the model has to answer
         final = rounds >= MAX_TOOL_ROUNDS
         text, calls = [], {}
+        schemas = registry.schemas(ctx) if registry else []
+        tool_args = {"tools": schemas, "tool_choice": "none" if final else "auto"} if schemas else {}
         try:
-            stream = await chat_client.chat.completions.create(
-                model=model,
+            stream = await model.provider.client.chat.completions.create(
+                model=model.id,
                 messages=messages,
-                tools=registry.schemas(ctx),
-                tool_choice="none" if final else "auto",
                 stream=True,
-                **model_options(model),
+                **tool_args,
+                **model.options,
             )
             async for chunk in stream:
                 if usage := _chunk_usage(chunk):
-                    yield ("usage", log_usage("chat", model, usage))
+                    yield ("usage", router.served(CHAT_TASK, model, "chat", usage))
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -159,20 +107,20 @@ async def _tool_rounds(messages: list[dict], registry, ctx):
                         call["name"] += tc.function.name or ""
                         call["arguments"] += tc.function.arguments or ""
         except RateLimitError:
-            # Each Groq model has its own limits: retry this round on the next model and stay on it
-            if model_index + 1 == len(CHAT_MODELS):
+            # Each model has its own limits: retry this round on the task's next model and stay on it
+            if model_index + 1 == len(models):
                 raise
             model_index += 1
-            log.warning("%s is rate-limited, falling back to %s", model, CHAT_MODELS[model_index])
+            log.warning("%s is rate-limited, falling back to %s", model.label, models[model_index].label)
             if text:
                 yield {"type": "retract", "chars": len("".join(text))}
             continue
         except TRANSIENT as e:
-            # A brief Groq server or network problem: retry the round once, then give up
+            # A brief server or network problem: retry the round once, then give up
             if retried:
                 raise
             retried = True
-            log.warning("%s request failed (%s), retrying once", model, type(e).__name__)
+            log.warning("%s request failed (%s), retrying once", model.label, type(e).__name__)
             if text:
                 yield {"type": "retract", "chars": len("".join(text))}
             await asyncio.sleep(1)
@@ -180,7 +128,7 @@ async def _tool_rounds(messages: list[dict], registry, ctx):
         except APIError as e:
             # Groq rejects tool calls the model formatted badly, sometimes mid-stream; retry the
             # round instead of failing, and take back any text the failed attempt streamed
-            if "tool_use_failed" in str(e) and not final:
+            if (getattr(e, "code", None) == "tool_use_failed" or "tool_use_failed" in str(e)) and not final:
                 log.warning("model produced a malformed tool call, retrying: %s", e)
                 if text:
                     yield {"type": "retract", "chars": len("".join(text))}
@@ -215,11 +163,9 @@ async def _tool_rounds(messages: list[dict], registry, ctx):
             yield {"type": "tool_end", "id": c["id"], "name": c["name"], **registry.describe(c["name"], result)}
 
 
-async def complete_json(messages: list[dict], model: str | None = None, purpose: str = "json") -> dict:
-    if LOCAL:
-        text = await _ollama_complete(messages)
-    else:
-        text = await _groq_complete(messages, model or GROQ_MODEL, purpose)
+async def complete_json(messages: list[dict], task: str, purpose: str = "json") -> dict:
+    """One JSON-mode completion for a background task (background_json, titles, morning_brief)."""
+    text = await _ollama_complete(messages) if LOCAL else await _cloud_complete(messages, task, purpose)
     return _parse_json(text)
 
 
@@ -238,16 +184,24 @@ async def _ollama_complete(messages: list[dict]) -> str:
     return resp.json()["message"]["content"]
 
 
-async def _groq_complete(messages: list[dict], model: str, purpose: str) -> str:
-    resp = await groq_client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0,
-        response_format={"type": "json_object"},
-        **model_options(model),
-    )
-    log_usage(purpose, model, resp.usage)
-    return resp.choices[0].message.content
+async def _cloud_complete(messages: list[dict], task: str, purpose: str) -> str:
+    models = router.candidates(task)
+    for i, model in enumerate(models):
+        try:
+            resp = await model.provider.background_client.chat.completions.create(
+                model=model.id,
+                messages=messages,
+                temperature=0,
+                response_format={"type": "json_object"},
+                **model.options,
+            )
+        except RateLimitError:
+            if i + 1 == len(models):
+                raise
+            log.warning("%s is rate-limited, falling back to %s", model.label, models[i + 1].label)
+            continue
+        router.served(task, model, purpose, resp.usage)
+        return resp.choices[0].message.content
 
 
 def _parse_json(text: str) -> dict:
