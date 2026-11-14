@@ -547,15 +547,17 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
               )}
             </>
           )}
-          <button
-            className="icon-button new-chat-button"
-            onClick={newConversation}
-            disabled={busy}
-            aria-label="New chat"
-            title="New chat"
-          >
-            <PlusIcon />
-          </button>
+          {inChat && (
+            <button
+              className="icon-button new-chat-button"
+              onClick={newConversation}
+              disabled={busy}
+              aria-label="New chat"
+              title="New chat"
+            >
+              <PlusIcon />
+            </button>
+          )}
         </header>
 
         {view === "memory" ? (

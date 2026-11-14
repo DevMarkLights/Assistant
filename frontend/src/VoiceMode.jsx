@@ -46,6 +46,9 @@ export default function VoiceMode({ sendMessage, onClose }) {
       setPhase("listening");
       await audioSettled();
       if (closed.current) return;
+      // Open the session's mic only now, after the unlock clip has finished: on iOS, starting
+      // recognition while audio is playing leaves the mic "on" but hearing nothing
+      if (!mic.current) startMic();
       const text = await mic.current.listen((words) => {
         setHeard(words);
         setError(null);
@@ -90,7 +93,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
         },
       });
     }
-  }, [sendMessage, bump]);
+  }, [sendMessage, bump, startMic]);
 
   // Starts the loop unless it's already running (a second loop would open a second mic)
   const converse = useCallback(async () => {
@@ -103,17 +106,18 @@ export default function VoiceMode({ sendMessage, onClose }) {
     }
   }, [conversation]);
 
-  // Start listening as soon as voice mode opens (it opens from a tap, which also unlocked speech)
+  // Start the conversation as soon as voice mode opens (it opens from a tap, which also unlocked
+  // speech); the loop opens the mic once the unlock clip has finished
   useEffect(() => {
     closed.current = false;
-    startMic();
     converse();
     return () => {
       closed.current = true;
       mic.current?.close();
+      mic.current = null;
       stopSpeaking();
     };
-  }, [startMic, converse]);
+  }, [converse]);
 
   const close = useCallback(() => {
     closed.current = true;
@@ -141,7 +145,8 @@ export default function VoiceMode({ sendMessage, onClose }) {
       stopSpeaking(); // interrupt; the turn loop then listens again
     } else if (phase === "error") {
       setError(null);
-      startMic();
+      mic.current?.close();
+      mic.current = null; // the loop opens a fresh one
       converse();
     }
   }
