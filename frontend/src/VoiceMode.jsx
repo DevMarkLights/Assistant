@@ -21,6 +21,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
   const [reply, setReply] = useState("");
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
+  const [micStage, setMicStage] = useState(null); // what the mic is doing, shown while listening
   const [spokenWord, setSpokenWord] = useState(-1); // index of the word being spoken, for highlighting
   const [activity, setActivity] = useState(0); // bumped on every heard or spoken word: animates the visual
   const bump = useCallback(() => setActivity((n) => n + 1), []);
@@ -35,11 +36,12 @@ export default function VoiceMode({ sendMessage, onClose }) {
     mic.current = openMic((message) => {
       micFailed.current = true;
       setError(message);
-    });
+    }, setMicStage);
   }, []);
 
   // Conversation loop: listen, send, speak, repeat, until closed
   const conversation = useCallback(async () => {
+    let spoke = false; // a reply was just spoken (or interrupted)
     while (!closed.current) {
       setStatus(null);
       setHeard("");
@@ -49,6 +51,9 @@ export default function VoiceMode({ sendMessage, onClose }) {
       // Open the session's mic only now, after the unlock clip has finished: on iOS, starting
       // recognition while audio is playing leaves the mic "on" but hearing nothing
       if (!mic.current) startMic();
+      // After a spoken reply, a fresh recognizer: on iOS the playback leaves the running one deaf
+      else if (spoke) mic.current.renew();
+      spoke = false;
       const text = await mic.current.listen((words) => {
         setHeard(words);
         setError(null);
@@ -92,6 +97,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
           });
         },
       });
+      spoke = true;
     }
   }, [sendMessage, bump, startMic]);
 
@@ -165,6 +171,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
           <VoiceVisual phase={phase} activity={activity} look={look} />
         </button>
         <p className="voice-phase" aria-live="polite">{PHASE_LABEL[phase]}</p>
+        {phase === "listening" && micStage && !heard && <p className="voice-status">{micStage}</p>}
         {status && <p className="voice-status">{status}</p>}
         {heard && <p className="voice-heard">“{heard}”</p>}
         {reply && phase !== "listening" && (

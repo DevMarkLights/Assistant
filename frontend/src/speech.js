@@ -19,12 +19,13 @@ export const synthesisSupported = "speechSynthesis" in window;
 // to close(), like a phone call. Turning it off and on each turn made iOS stop delivering audio
 // after a few turns. Words only count while listen() is waiting; anything heard while thinking or
 // speaking (including the assistant's own voice) is ignored. If the browser ends the recognizer by
-// itself, it's restarted right away. onFatal(message) reports errors that need the user (mic not
-// allowed, or no mic); the mic stays off after one.
+// itself, it's restarted right away; renew() swaps in a fresh one after each spoken reply (iOS).
+// onFatal(message) reports errors that need the user (mic not allowed, or no mic); the mic stays
+// off after one. onStage(text) reports what the mic is doing, for the status line.
 const PAUSE_MS = 1200; // this long after the last words, the utterance is done
 const FATAL = new Set(["not-allowed", "service-not-allowed", "audio-capture"]);
 
-export function openMic(onFatal) {
+export function openMic(onFatal, onStage) {
   let recognition = null;
   let closed = false;
   let results = []; // transcripts from the current recognizer, by result index
@@ -35,6 +36,11 @@ export function openMic(onFatal) {
   let startedAt = 0;
 
   const heard = () => [carried, ...results.slice(from)].join(" ").replace(/\s+/g, " ").trim();
+  // What the mic is doing, for the status line under "Listening…" (shows where it stalls)
+  const stage = (name) => {
+    console.debug("[mic]", name);
+    onStage?.(name);
+  };
 
   const finishTurn = () => {
     clearTimeout(pause);
@@ -55,6 +61,10 @@ export function openMic(onFatal) {
     results = [];
     from = 0;
     startedAt = performance.now();
+    rec.onstart = () => stage("mic on, waiting for audio");
+    rec.onaudiostart = () => stage("receiving audio");
+    rec.onsoundstart = () => stage("hearing sound");
+    rec.onspeechstart = () => stage("hearing speech");
     rec.onresult = (event) => {
       for (let i = event.resultIndex; i < event.results.length; i++) results[i] = event.results[i][0].transcript;
       results.length = event.results.length;
@@ -66,6 +76,7 @@ export function openMic(onFatal) {
       pause = setTimeout(finishTurn, PAUSE_MS);
     };
     rec.onerror = (event) => {
+      stage(`error: ${event.error}`);
       if (!FATAL.has(event.error)) return; // no-speech, aborted, network: onend restarts it
       closed = true;
       onFatal?.(errorMessage(event.error));
@@ -74,6 +85,7 @@ export function openMic(onFatal) {
     rec.onend = () => {
       if (recognition !== rec || closed) return;
       if (turn) carried = heard(); // keep words heard so far in this turn
+      stage("mic ended, restarting");
       // Ended at once: wait a moment so a failing mic can't restart in a tight loop
       setTimeout(start, performance.now() - startedAt < 1000 ? 1000 : 0);
     };
@@ -94,6 +106,24 @@ export function openMic(onFatal) {
     },
     // End the current turn now with whatever was heard (tapping "done talking")
     finish: finishTurn,
+    // Swaps the recognizer for a fresh one. Call after a reply has been spoken: on iOS, playing
+    // audio leaves a running recognizer "on" but deaf, and nothing ends it to trigger a restart.
+    renew() {
+      if (closed) return;
+      const old = recognition;
+      recognition = null;
+      let started = false;
+      const fresh = () => {
+        if (started || closed) return;
+        started = true;
+        start();
+      };
+      if (!old) return fresh();
+      old.onresult = old.onerror = null;
+      old.onend = fresh; // start the new one once the old has let go of the mic
+      old.abort();
+      setTimeout(fresh, 500); // in case the old one never reports ending
+    },
     close() {
       closed = true;
       finishTurn();
