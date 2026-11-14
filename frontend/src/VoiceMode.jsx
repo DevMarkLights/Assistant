@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { MicError, audioSettled, listenOnce, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
+import { MicError, audioSettled, closeMicSession, listenOnce, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
 import VoiceVisual from "./VoiceVisual";
 
 const PHASE_LABEL = {
@@ -12,7 +12,7 @@ const PHASE_LABEL = {
 // Full-screen voice conversation over the chat: listen -> send -> speak the reply -> listen again.
 // Messages go through the normal chat pipeline (sendMessage), so they also appear in the chat.
 // It keeps going hands-free until closed. Each turn records what the user says (listenOnce: the mic
-// is open only while listening) and has the server transcribe it. A failed transcription or reply
+// is opened once per session and muted between turns) and has the server transcribe it. A failed transcription or reply
 // is shown while it listens again; only a microphone error stops it.
 export default function VoiceMode({ sendMessage, onClose }) {
   const [phase, setPhase] = useState("listening");
@@ -124,6 +124,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
       closed.current = true;
       take.current?.abort();
       stopSpeaking();
+      closeMicSession();
     };
   }, [converse]);
 
@@ -131,6 +132,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
     closed.current = true;
     take.current?.abort();
     stopSpeaking();
+    closeMicSession();
     onClose();
   }, [onClose]);
 

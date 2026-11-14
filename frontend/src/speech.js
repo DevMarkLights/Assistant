@@ -15,8 +15,10 @@ export const MAX_SPEED = 1.5;
 export const voiceInputSupported = Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
 export const synthesisSupported = "speechSynthesis" in window;
 
-// Listening: one utterance per call. The mic is opened for it and released afterwards, so nothing
-// is recording while the reply plays. The sound level is checked every CHECK_MS: once the user has
+// Listening: one utterance per call. The mic is opened once per voice session (openMicSession) and
+// kept, because iOS asks for permission again if it's released for long (e.g. during a long reply);
+// between turns its track is muted (track.enabled = false), so nothing is recorded while the reply
+// plays. closeMicSession() releases it when voice mode closes. The sound level is checked every CHECK_MS: once the user has
 // spoken (louder than the background for SPEECH_MS) and then been quiet for SILENCE_MS, the clip
 // is uploaded and transcribed. A take with no speech for IDLE_MS is thrown away and recording
 // starts over, so silence is never uploaded.
@@ -45,6 +47,35 @@ function recordingType() {
 
 export class MicError extends Error {}
 
+let sessionStream = null;
+
+async function openMicSession() {
+  const live = sessionStream?.getAudioTracks().some((track) => track.readyState === "live");
+  if (!live) {
+    try {
+      sessionStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      sessionStream = null;
+      throw new MicError(e?.name === "NotAllowedError"
+        ? "Microphone access was blocked. Allow the microphone for this site (on iPhone: Settings → Safari → Microphone), then tap to try again."
+        : "Couldn't open the microphone. Is another app using it?");
+    }
+  }
+  return sessionStream;
+}
+
+function muteMic(muted) {
+  sessionStream?.getAudioTracks().forEach((track) => (track.enabled = !muted));
+}
+
+// Releases the microphone (call when voice mode closes)
+export function closeMicSession() {
+  sessionStream?.getTracks().forEach((track) => track.stop());
+  sessionStream = null;
+}
+
 // Records one utterance and returns its text ("" if stopped before anything was said).
 // onStage(text) reports progress ("listening", "hearing you", "transcribing…"); onLevel(0-1) the
 // live sound level, for the animation. stop() ends the take now (sends what was said); abort()
@@ -53,16 +84,8 @@ export function listenOnce({ onStage, onLevel } = {}) {
   let stopRequested = false;
   let aborted = false;
   const done = (async () => {
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-    } catch (e) {
-      throw new MicError(e?.name === "NotAllowedError"
-        ? "Microphone access was blocked. Allow the microphone for this site (on iPhone: Settings → Safari → Microphone), then tap to try again."
-        : "Couldn't open the microphone. Is another app using it?");
-    }
+    const stream = await openMicSession();
+    muteMic(false);
     let source = null;
     try {
       unlockMic();
@@ -131,7 +154,7 @@ export function listenOnce({ onStage, onLevel } = {}) {
       return "";
     } finally {
       source?.disconnect();
-      stream.getTracks().forEach((track) => track.stop()); // release the mic before anything plays
+      muteMic(true); // nothing is recorded while the reply plays; the mic itself stays granted
     }
   })();
   return {
