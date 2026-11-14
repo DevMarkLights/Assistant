@@ -8,6 +8,8 @@ from .client import close_db, init_db, now  # noqa: F401
 from .conversations import *  # noqa: F401,F403
 from .exchanges import *  # noqa: F401,F403
 from .facts import *  # noqa: F401,F403
+from .llm_events import *  # noqa: F401,F403
+from .llm_usage import *  # noqa: F401,F403
 from .push import *  # noqa: F401,F403
 from .reminders import *  # noqa: F401,F403
 from .users import *  # noqa: F401,F403

@@ -3,7 +3,6 @@
 # What the model sees is built in app/services/chat_context.py.
 import asyncio
 import json
-import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,7 +13,9 @@ from app.api.auth import current_user
 from app.api.schemas import ChatRequest, ExchangeIn, TitleUpdate
 from app.core.config import ALL_FACTS_LIMIT, EMBED_MODEL, FACT_TOP_K, HISTORY_TURNS, MIN_SIMILARITY, TOP_K
 from app.core.logs import get_logger
-from app.llm.client import RateLimitError, chat_stream
+from app.llm.client import ReplyInterrupted, chat_stream
+from app.llm import router
+from app.llm.router import AllModelsBusy
 from app.llm.embeddings import embed
 from app.memory import retrieval, titles
 from app.memory import writer as memory_writer
@@ -133,17 +134,17 @@ async def chat(conversation_id: str, req: ChatRequest, request: Request,
                         tool_calls.append({k: piece[k] for k in ("name", "ok", "summary", "detail")})
                     if out := event(piece):
                         yield out
-        except RateLimitError as e:
-            log.warning("rate limit on every chat model: %s", e)
-            # Groq says when to retry, e.g. "Please try again in 7m38.784s"
-            wait = re.search(r"try again in ((?:\d+h)?(?:\d+m)?)([\d.]+s)?", str(e))
-            if wait and wait.group(1):
-                when = f" Try again in about {wait.group(1)}."
-            elif wait:
-                when = " Try again in a few seconds."
-            else:
-                when = " Try again later."
-            yield event({"type": "error", "message": "The AI service's usage limit was reached." + when})
+        except ReplyInterrupted as e:
+            log.warning("reply interrupted: %s", e)
+            router.record_event("interrupted", "chat_tools", None, str(e))
+            yield event({"type": "error", "message": "The reply was cut off by an error from the AI service. Please try again."})
+            if title_task:
+                title_task.cancel()
+            return
+        except AllModelsBusy as e:
+            log.warning("no chat model available: %s", e)
+            router.record_event("busy", "chat_tools", None, "; ".join(e.reasons))
+            yield event({"type": "error", "message": e.user_message()})
             if title_task:
                 title_task.cancel()
             return

@@ -12,6 +12,21 @@ providers:
     key_env: GROQ_API_KEY
     allow_personal_data: true  # approved by the owner, 2026-11-13
     policy_url: https://console.groq.com/docs/your-data
+    # What its x-ratelimit-remaining-{requests,tokens} headers count: Groq's requests header is
+    # per day and its tokens header per minute (https://console.groq.com/docs/rate-limits).
+    # Leave this out for a provider whose headers aren't documented: they're then ignored.
+    rate_limit_headers: {requests: day, tokens: minute}
+  gemini:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    key_env: GEMINI_API_KEY
+    # Free tier ("Unpaid Services"): Google uses prompts and responses to improve its products,
+    # human reviewers may read them, and the terms say "Do not submit sensitive, confidential, or
+    # personal information to the Unpaid Services." So no personal data: Gemini serves titles only.
+    # A paid (billing-enabled) project has different terms; review them before changing this.
+    allow_personal_data: false
+    policy_url: https://ai.google.dev/gemini-api/terms
+    stream_usage: true  # streamed replies report token usage only when asked (stream_options)
+    # No rate_limit_headers: Gemini doesn't document any; our counts and 429 cooldowns cover it.
 
 # Each model: its provider, the id the provider expects, what it can do, its free-tier limits
 # (per minute / per day: requests and tokens; null = no limit), and extra request options.
@@ -28,24 +43,48 @@ models:
     capabilities: {tools: true, json_mode: true, vision: false, context_length: 131072}
     limits: {rpm: 30, tpm: 8000, rpd: 1000, tpd: 200000}
     options: {reasoning_effort: low}
+  # Gemini limits: the free tier for this project, as shown in Google AI Studio on 2026-11-13
+  # (Google no longer publishes a table). Capabilities: Google's OpenAI-compatibility docs
+  # (https://ai.google.dev/gemini-api/docs/openai; tools, JSON mode and image input supported, still
+  # in beta) and context sizes from the models API (inputTokenLimit). Both models always "think";
+  # reasoning_effort low keeps that short.
+  gemini-3.5-flash-lite:
+    provider: gemini
+    id: gemini-3.5-flash-lite
+    capabilities: {tools: true, json_mode: true, vision: true, context_length: 1048576}
+    limits: {rpm: 10, tpm: 250000, rpd: 500, tpd: null}
+    options: {reasoning_effort: low}
+  gemini-3.8-flash:
+    provider: gemini
+    id: gemini-3.8-flash
+    capabilities: {tools: true, json_mode: true, vision: true, context_length: 1048576}
+    limits: {rpm: 5, tpm: 250000, rpd: 20, tpd: null}  # 20 a day: a last resort only
+    options: {reasoning_effort: low}
 
-# Each task: whether it sends personal data, the capabilities it needs, and its models in order
-# of preference. Groq's limits are per model, so background work uses a different model from chat
-# and doesn't eat into chat's budget.
+# Each task: whether it sends personal data, the capabilities it needs, its models in order of
+# preference, and max_output: the reply tokens to budget for (with the prompt's estimate, a model
+# is skipped if its remaining budget can't fit both). Groq's limits are per model, so background
+# work uses a different model from chat and doesn't eat into chat's budget. Models whose provider
+# may not receive personal data are listed too but skipped for personal-data tasks, so approving a
+# provider later is a one-line change.
 tasks:
   chat_tools:  # the chat reply, streamed, with tool calling
     personal_data: true
     needs: [tools]
-    models: [gpt-oss-120b, gpt-oss-20b]
+    max_output: 1000
+    models: [gpt-oss-120b, gpt-oss-20b, gemini-3.8-flash, gemini-3.5-flash-lite]
   background_json:  # memory extraction and memory decisions (JSON mode)
     personal_data: true
     needs: [json_mode]
-    models: [gpt-oss-20b]
+    max_output: 400
+    models: [gpt-oss-20b, gemini-3.5-flash-lite]
   titles:  # a chat's title from its first message
     personal_data: false
     needs: [json_mode]
-    models: [gpt-oss-20b]
+    max_output: 100
+    models: [gpt-oss-20b, gemini-3.5-flash-lite]  # Gemini serves titles when 20b can't
   morning_brief:
     personal_data: true
     needs: [json_mode]
-    models: [gpt-oss-20b]
+    max_output: 1200
+    models: [gpt-oss-20b, gemini-3.5-flash-lite]

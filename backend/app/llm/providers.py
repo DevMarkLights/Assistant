@@ -26,12 +26,12 @@ class Provider:
     key_env: str
     allow_personal_data: bool = False
     policy_url: str = ""
+    rate_limit_headers: dict = field(default_factory=dict)  # {"requests": "day", "tokens": "minute"}
+    stream_usage: bool = False  # ask for usage in streams (stream_options); Groq sends it unasked
     api_key: str | None = None
-    # `client` (chat) has no SDK retries: the chat loop handles errors and failover itself, since
-    # the SDK quietly waits out a rate limit (up to a minute) before retrying. `background_client`
-    # keeps the SDK's two retries for background JSON calls, as before the router (Stage 1).
+    # No SDK retries: the SDK would quietly wait out a rate limit (up to a minute). The client and
+    # router handle retries, cooldowns and failover themselves.
     client: AsyncOpenAI | None = None
-    background_client: AsyncOpenAI | None = None
 
 
 @dataclass
@@ -58,6 +58,7 @@ class Task:
     personal_data: bool
     needs: list[str]
     models: list[Model]
+    max_output: int = 500  # reply tokens to budget for
 
 
 @dataclass
@@ -78,8 +79,12 @@ def load(path: Path = CONFIG_PATH, env=os.environ) -> Config:
     raw = yaml.safe_load(path.read_text()) or {}
     providers = {}
     for name, p in (raw.get("providers") or {}).items():
+        scopes = p.get("rate_limit_headers") or {}
+        if bad := {k: v for k, v in scopes.items() if k not in ("requests", "tokens") or v not in ("minute", "day")}:
+            raise ValueError(f"{path.name}: provider {name} rate_limit_headers {bad}: use requests/tokens: minute/day")
         provider = Provider(name, _require(p, "base_url", f"provider {name}"), _require(p, "key_env", f"provider {name}"),
-                            bool(p.get("allow_personal_data", False)), p.get("policy_url", ""))
+                            bool(p.get("allow_personal_data", False)), p.get("policy_url", ""), scopes,
+                            bool(p.get("stream_usage", False)))
         provider.api_key = env.get(provider.key_env) or None
         providers[name] = provider
     models = {}
@@ -97,7 +102,8 @@ def load(path: Path = CONFIG_PATH, env=os.environ) -> Config:
         listed = _require(t, "models", f"task {name}")
         if missing := [k for k in listed if k not in models]:
             raise ValueError(f"{path.name}: task {name} lists unknown models {missing}")
-        tasks[name] = Task(name, bool(t.get("personal_data", True)), needs, [models[k] for k in listed])
+        tasks[name] = Task(name, bool(t.get("personal_data", True)), needs, [models[k] for k in listed],
+                           int(t.get("max_output", 500)))
     return Config(providers, models, tasks)
 
 
@@ -110,7 +116,6 @@ def connect(config: Config) -> None:
             continue
         provider.client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url,
                                       timeout=TIMEOUT, max_retries=0)
-        provider.background_client = provider.client.with_options(max_retries=2)
 
 
 config: Config | None = None
@@ -118,6 +123,8 @@ if not LOCAL:
     config = load()
     connect(config)
     for task in config.tasks.values():
+        if held_back := [m.label for m in task.models if task.personal_data and not m.provider.allow_personal_data]:
+            log.info("task %s skips %s (provider not approved for personal data)", task.name, ", ".join(held_back))
         if not any(m.provider.client for m in task.models):
             raise RuntimeError(f"LOCAL=false, but task {task.name} has no model with an API key "
                                f"({', '.join(sorted({m.provider.key_env for m in task.models}))} in .env)")

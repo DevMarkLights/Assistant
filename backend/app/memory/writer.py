@@ -78,12 +78,15 @@ async def process_exchange(user_id: str, conversation_id: str, user_text: str, a
         log.exception("background memory update failed")
 
 
+EXTRACT_TASK = "background_json"  # the router task for extraction; evals/run_extraction.py swaps it
+
+
 async def extract_facts(user_text: str, assistant_text: str) -> list[ExtractedFact]:
     messages = [
         {"role": "system", "content": EXTRACT_PROMPT},
         {"role": "user", "content": f"User: {user_text}\nAssistant: {assistant_text}"},
     ]
-    data = await complete_json(messages, task="background_json", purpose="memory-extract")
+    data = await complete_json(messages, task=EXTRACT_TASK, purpose="memory-extract")
     try:
         return Extraction.model_validate(data).facts
     except ValidationError as e:

@@ -8,9 +8,9 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import db
-from app.api import auth, brief, chat, health, memory, push, tts
+from app.api import auth, brief, chat, health, memory, push, tts, usage
 from app.core.config import ENABLE_DOCS
-from app.llm import embeddings
+from app.llm import embeddings, router
 from app.services import scheduler
 from app.services import tts as tts_service
 from app.tools import groups as tool_groups
@@ -24,6 +24,7 @@ async def _warm_up():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
+    await router.load_usage()  # today's LLM usage, so rate limits survive restarts
     scheduler.start()
     # Load the embedding model (then embed the tool groups' example phrases) and Piper voices in the
     # background so the first replies are fast
@@ -39,7 +40,7 @@ async def lifespan(app: FastAPI):
 docs = {} if ENABLE_DOCS else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 app = FastAPI(title="Personal Assistant", lifespan=lifespan, **docs)
 app.middleware("http")(auth.require_login)
-for module in (auth, chat, memory, push, brief, tts, health):
+for module in (auth, chat, memory, push, brief, tts, usage, health):
     app.include_router(module.router)
 
 # Last, so API routes take precedence over the static files

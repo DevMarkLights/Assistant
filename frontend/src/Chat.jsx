@@ -5,6 +5,7 @@ import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import Memory from "./Memory";
 import Settings from "./Settings";
+import Usage from "./Usage";
 import VoiceMode from "./VoiceMode";
 import { recognitionSupported, unlockSpeech } from "./speech";
 import { useTheme } from "./theme";
@@ -425,7 +426,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
 
   const activeConversation = conversations.find((c) => c.id === activeId);
   const heading =
-    view === "memory" ? "Memory" : view === "settings" ? "Settings"
+    view === "memory" ? "Memory" : view === "settings" ? "Settings" : view === "usage" ? "AI usage"
       : activeConversation ? titleOf(activeConversation) : "New chat";
 
   return (
@@ -494,6 +495,15 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
         >
           Settings
         </button>
+        {user.owner && (
+          <button
+            className={`memory-link ${view === "usage" ? "active" : ""}`}
+            onClick={() => openView("usage")}
+            disabled={busy}
+          >
+            AI usage
+          </button>
+        )}
         <div className="account">
           <span className="username">{user.username}</span>
           <button
@@ -552,6 +562,8 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           <Memory api={api} />
         ) : view === "settings" ? (
           <Settings api={api} />
+        ) : view === "usage" ? (
+          <Usage api={api} />
         ) : (
           <>
             <div className="messages">

@@ -19,6 +19,8 @@ push_subscriptions = database["push_subscriptions"]
 briefs = database["briefs"]
 reminders = database["reminders"]
 brief_sections = database["brief_sections"]
+llm_usage = database["llm_usage"]
+llm_events = database["llm_events"]
 
 VECTOR_INDEX = "exchange_vector_index"
 FACT_VECTOR_INDEX = "fact_vector_index"
@@ -45,6 +47,9 @@ async def init_db():
     await reminders.create_index([("status", ASCENDING), ("due_at", ASCENDING)])
     await reminders.create_index([("user_id", ASCENDING), ("status", ASCENDING), ("due_at", ASCENDING)])
     await brief_sections.create_index([("user_id", ASCENDING), ("position", ASCENDING)])
+    await llm_usage.create_index("day")
+    if "llm_events" not in await database.list_collection_names():
+        await database.create_collection("llm_events", capped=True, size=1_000_000, max=1000)
 
 async def close_db():
     await client.close()

@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pwdlib import PasswordHash
 
 from app import db
-from app.core.config import ALLOW_SIGNUP, COOKIE_SECURE, SESSION_DAYS
+from app.core.config import ALLOW_SIGNUP, COOKIE_SECURE, HOMELAB_USERS, SESSION_DAYS
 from app.api.schemas import Credentials
 
 COOKIE_NAME = "session"
@@ -82,7 +82,7 @@ async def register(creds: Credentials, response: Response):
     if not user:
         raise HTTPException(status_code=409, detail="Username is taken")
     await _start_session(response, user["id"])
-    return user
+    return public_user(user)
 
 
 @router.post("/login")
@@ -92,7 +92,7 @@ async def login(creds: Credentials, response: Response):
     if not user or not valid:
         raise HTTPException(status_code=401, detail="Wrong username or password")
     await _start_session(response, user["id"])
-    return {"id": user["id"], "username": user["username"]}
+    return public_user(user)
 
 
 @router.post("/logout", status_code=204)
@@ -102,6 +102,16 @@ async def logout(response: Response, session: str | None = Cookie(default=None))
     response.delete_cookie(COOKIE_NAME, path="/Assistant")
 
 
+def is_owner(user: dict) -> bool:
+    """The server's owner (HOMELAB_USERS): the only one who sees server details and LLM usage."""
+    return user["username"].lower() in HOMELAB_USERS
+
+
+def public_user(user: dict) -> dict:
+    """What the frontend gets for the signed-in user, the same from login, register and /me."""
+    return {"id": user["id"], "username": user["username"], "owner": is_owner(user)}
+
+
 @router.get("/me")
 async def me(user: dict = Depends(current_user)):
-    return user
+    return public_user(user)

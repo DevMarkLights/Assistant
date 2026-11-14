@@ -4,6 +4,11 @@
 # Run from backend/:
 #   ../.venv/bin/python evals/run_extraction.py                      # current prompt, background_json's first model
 #   ../.venv/bin/python evals/run_extraction.py --model gpt-oss-120b  # a model name from models.yaml
+#   ../.venv/bin/python evals/run_extraction.py --model gemini/gemini-3.5-flash   # any model of a configured
+#                                                                    # provider, before adding it to models.yaml
+#
+# The cases are made up, not personal data, so the eval runs as its own non-personal task: it can
+# check a model whose provider isn't approved for personal data, before adding it to background_json.
 #   ../.venv/bin/python evals/run_extraction.py --prompt my_prompt.txt --label "stricter rules"
 #   ../.venv/bin/python evals/run_extraction.py --fake               # check the scorer, no API calls
 #
@@ -28,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # import backend modules
 
 from app.llm import providers, router  # noqa: E402
-from app.llm.client import RateLimitError  # noqa: E402
+from app.llm.providers import Model, Task  # noqa: E402
 from app.memory import writer as memory_writer  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -62,19 +67,33 @@ async def extract(case: dict, fake: bool) -> list[str]:
         try:
             facts = await memory_writer.extract_facts(case["user"], case["assistant"])
             return [f.text for f in facts]
-        except RateLimitError as e:
-            wait = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", str(e))
-            seconds = (int(wait.group(1) or 0) * 60 + float(wait.group(2))) if wait else 30
-            if seconds > 120 or attempt == 3:
-                sys.exit(f"\nRate limit won't clear soon ({e}). Try again later.")
-            print(f"  (rate-limited, waiting {seconds:.0f}s)")
-            await asyncio.sleep(seconds + 1)
+        except router.AllModelsBusy as e:  # background calls already waited up to a minute
+            if e.wait > 120 or attempt == 3:
+                sys.exit(f"\nThe model is busy and won't free up soon ({e}). Try again later.")
+            print(f"  (model busy, waiting {e.wait:.0f}s)")
+            await asyncio.sleep(e.wait + 1)
     return []
+
+
+def resolve_model(name: str) -> Model:
+    """A models.yaml name, or "provider/model-id" for a model not in models.yaml yet."""
+    if name in providers.config.models:
+        return providers.config.models[name]
+    provider_name, _, model_id = name.partition("/")
+    provider = providers.config.providers.get(provider_name)
+    if not provider or not model_id:
+        sys.exit(f"unknown model {name!r}: use a models.yaml name ({', '.join(providers.config.models)}) "
+                 f"or provider/model-id with a provider from models.yaml ({', '.join(providers.config.providers)})")
+    model = Model(name, provider, model_id, {"json_mode": True}, {})
+    router.register(model)
+    print(f"(not in models.yaml: assuming JSON mode works; no rate limits known, but 429s are handled)")
+    return model
 
 
 async def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", help="a model name from models.yaml (default: background_json's first model)")
+    parser.add_argument("--model", help="a model name from models.yaml, or provider/model-id for any model of a "
+                                        "configured provider (default: background_json's first model)")
     parser.add_argument("--prompt", type=Path, help="file with an extraction prompt to try instead of EXTRACT_PROMPT")
     parser.add_argument("--cases", type=Path, default=HERE / "extraction_cases.json")
     parser.add_argument("--label", default="", help="note saved with this run, e.g. 'shorter prompt'")
@@ -84,13 +103,14 @@ async def main():
     args = parser.parse_args()
 
     logging.getLogger("assistant").setLevel(logging.WARNING)
-    # Every background_json call in this run goes to the chosen model only
-    task = providers.config.tasks["background_json"]
-    if args.model:
-        if args.model not in providers.config.models:
-            sys.exit(f"unknown model {args.model!r}; models.yaml has: {', '.join(providers.config.models)}")
-        task.models = [providers.config.models[args.model]]
-    args.model = router.candidates("background_json")[0].label
+    # Extraction in this run goes to the chosen model only, through a non-personal "eval" task
+    model = resolve_model(args.model) if args.model else router.candidates("background_json")[0]
+    providers.config.tasks["eval"] = Task("eval", personal_data=False, needs=["json_mode"], models=[model],
+                                          max_output=providers.config.tasks["background_json"].max_output)
+    memory_writer.EXTRACT_TASK = "eval"
+    if not args.fake:
+        router.candidates("eval")  # fails early if its provider has no key
+    args.model = model.label
     if args.prompt:
         memory_writer.EXTRACT_PROMPT = args.prompt.read_text()
     prompt_id = hashlib.sha1(memory_writer.EXTRACT_PROMPT.encode()).hexdigest()[:8]

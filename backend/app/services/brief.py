@@ -6,10 +6,10 @@
 from datetime import datetime, timedelta
 
 from app import db
-from app.core.config import BRIEF_USERS, MORNING_BRIEF_TIME
+from app.core.config import BRIEF_USERS, HOMELAB_USERS, MORNING_BRIEF_TIME
 from app.core.logs import get_logger
 from app.llm.client import complete_json
-from app.services import brief_sections, push, usertime
+from app.services import brief_sections, llm_report, push, usertime
 
 log = get_logger("brief")
 
@@ -84,6 +84,16 @@ async def write(notes: dict) -> dict:
     return _fallback(notes)
 
 
+async def _usage_line() -> str:
+    """Yesterday's LLM usage and fallbacks, as a closing line in italics ("" if none or failed)."""
+    try:
+        line = await llm_report.yesterday_line()
+    except Exception:
+        log.warning("couldn't summarize yesterday's LLM usage", exc_info=True)
+        return ""
+    return f"\n\n_{line}_" if line else ""
+
+
 async def run_for_user(user: dict, force: bool = False) -> dict:
     """Creates and pushes today's brief. Returns {"status", "conversation_id"}; never raises."""
     now = datetime.now(await usertime.user_zone(user["id"]))
@@ -96,6 +106,8 @@ async def run_for_user(user: dict, force: bool = False) -> dict:
         log.info("forcing a new brief for %s on %s (testing)", user["username"], date)
     try:
         written = await write(await gather(user, now))
+        if user["username"].lower() in HOMELAB_USERS:  # LLM usage is a server detail: owner only
+            written["brief"] += await _usage_line()
         conversation = await db.create_conversation(user["id"], title=f"Morning brief, {now:%b %-d}")
         await db.add_exchange(user["id"], conversation["id"], "", written["brief"], None, "none")
     except Exception:
