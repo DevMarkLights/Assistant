@@ -16,7 +16,7 @@ log = get_logger("llm")
 
 CONFIG_PATH = Path(os.getenv("MODELS_CONFIG", BACKEND_DIR / "models.yaml"))
 TIMEOUT = httpx.Timeout(120.0, connect=5.0)
-CAPABILITIES = ("tools", "json_mode", "vision")
+CAPABILITIES = ("tools", "json_mode", "vision", "transcription")
 
 
 @dataclass

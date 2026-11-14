@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  MAX_SPEED, MIN_SPEED, englishVoices, piperVoices, recognitionSupported, saveEngine, saveLook, savePiperVoice, saveSpeed,
-  saveVoiceURI, savedEngine, savedLook, savedPiperVoice, savedSpeed, savedVoiceURI, speak, synthesisSupported, unlockSpeech,
+  MAX_SPEED, MIN_SPEED, englishVoices, piperVoices, saveEngine, saveLook, savePiperVoice, saveSpeed,
+  saveVoiceURI, savedEngine, savedLook, savedPiperVoice, savedSpeed, savedVoiceURI, speak, synthesisSupported, unlockSpeech, voiceInputSupported,
 } from "./speech";
 
 // VAPID keys are base64url; PushManager.subscribe wants raw bytes
@@ -71,10 +71,10 @@ function VoiceSettings() {
     <section>
       <h3>Voice</h3>
       <div className="settings-card">
-        {!recognitionSupported && (
+        {!voiceInputSupported && (
           <p className="settings-message">
-            This browser can't recognize speech, so voice mode isn't available here. The keyboard's
-            dictation mic still works for typing by voice.
+            This browser can't record from the microphone, so voice mode isn't available here. The
+            keyboard's dictation mic still works for typing by voice.
           </p>
         )}
 

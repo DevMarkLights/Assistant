@@ -245,3 +245,32 @@ def _parse_json(text: str) -> dict:
     if text.startswith("```"):
         text = text.strip("`").removeprefix("json").strip()
     return json.loads(text)
+
+async def transcribe(audio: bytes, filename: str, language: str | None = None, seconds: float = 0.0) -> str:
+    """Speech to text for voice mode, through the router's "transcribe" task (Whisper on Groq):
+    failover on 429s and errors like every other request. `seconds` is the recording's length (from
+    the browser), checked against the models' audio-seconds-per-hour/day limits; Whisper's own
+    measurement replaces it afterwards. Raises AllModelsBusy if no model is free."""
+    pick = router.Failover("transcribe", 0, audio=seconds)
+    while True:
+        model = await pick.next()
+        reservation = router.reserve(model, 0, seconds)
+        try:
+            raw = await model.provider.client.audio.transcriptions.with_raw_response.create(
+                model=model.id,
+                file=(filename, audio),
+                **({"language": language} if language else {}),
+                response_format="verbose_json",  # includes the audio's duration
+                temperature=0,
+            )
+        except RateLimitError as e:
+            pick.rate_limited(model, e, reservation)
+            continue
+        except (APIError, httpx.HTTPError) as e:
+            pick.failed(model, e, reservation)
+            continue
+        result = raw.parse()
+        duration = getattr(result, "duration", None)
+        router.served("transcribe", model, f"{len(audio) // 1024} KB", None, reservation, raw.headers,
+                      audio_seconds=float(duration) if duration is not None else seconds)
+        return result.text.strip()

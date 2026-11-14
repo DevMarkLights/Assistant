@@ -44,6 +44,12 @@ class FakeGroq:
         self.remaining_tokens = {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/audio/transcriptions"):  # multipart: the model is a form field
+            model = request.content.split(b'name="model"')[1].split(b"\r\n\r\n")[1].split(b"\r\n")[0].decode()
+            self.requests.append(model)
+            if model in self.limited:
+                return httpx.Response(429, headers={"retry-after": self.retry_after}, json={"error": {"message": "rate limited"}})
+            return httpx.Response(200, json={"text": " remind me to call mom ", "duration": 2.4})
         body = json.loads(request.content)
         model = body["model"]
         self.requests.append(model)
@@ -227,3 +233,26 @@ def test_the_eval_can_check_a_model_that_memory_extraction_cannot_use(fake, monk
     monkeypatch.setattr(memory_writer, "EXTRACT_TASK", "background_json")
     asyncio.run(memory_writer.extract_facts("I live in Atlanta", "Nice!"))
     assert fake.requests == [GEMINI, SMALL]  # real extraction stays on approved providers
+
+
+# --- transcription (voice mode) ---
+
+def test_transcription_goes_through_the_router(fake):
+    text = asyncio.run(llm.transcribe(b"fake audio", "speech.m4a", "en", seconds=3.0))
+    assert text == "remind me to call mom" and fake.requests == ["whisper-large-v3-turbo"]
+    left = router.limiter.remaining("whisper-large-v3-turbo")
+    assert left["minute_requests"] == 19
+    assert left["hour_audio"] == pytest.approx(7200 - 2.4)  # Whisper's measured 2.4s, not the browser's 3.0s
+
+
+def test_transcription_skips_a_model_out_of_audio_seconds(fake):
+    turbo = router.limiter.models["whisper-large-v3-turbo"]
+    turbo.hour_audio.append([router.limiter.clock.now(), 7199.0])
+    asyncio.run(llm.transcribe(b"fake audio", "speech.m4a", seconds=5.0))
+    assert fake.requests == ["whisper-large-v3"]  # turbo couldn't fit 5 more seconds this hour
+
+
+def test_transcription_fails_over_when_turbo_is_rate_limited(fake):
+    fake.limited.add("whisper-large-v3-turbo")
+    assert asyncio.run(llm.transcribe(b"fake audio", "speech.m4a")) == "remind me to call mom"
+    assert fake.requests == ["whisper-large-v3-turbo", "whisper-large-v3"]

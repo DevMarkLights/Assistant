@@ -59,9 +59,9 @@ def _save_later(write, what: str) -> None:
     task.add_done_callback(_pending.discard)
 
 
-def _persist(model: str, day: str, requests: int, tokens: int) -> None:
+def _persist(model: str, day: str, requests: int, tokens: int, audio_seconds: float = 0.0) -> None:
     """Adds a finished request to the daily totals in Mongo."""
-    _save_later(lambda: db.add_llm_usage(model, day, requests, tokens), f"LLM usage for {model}")
+    _save_later(lambda: db.add_llm_usage(model, day, requests, tokens, audio_seconds), f"LLM usage for {model}")
 
 
 def record_event(kind: str, task: str | None, model: str | None, detail: str = "") -> None:
@@ -121,16 +121,16 @@ def estimate(task_name: str, messages: list[dict], tools: list[dict] | None = No
     return prompt // 4 + providers.config.tasks[task_name].max_output
 
 
-def available(task_name: str, tokens: int, exclude: set[str] = frozenset()) -> list[Model]:
-    """The task's models that can take a request of about `tokens` now, in order of preference.
-    Raises AllModelsBusy (with the shortest wait) if none can."""
+def available(task_name: str, tokens: int, exclude: set[str] = frozenset(), audio: float = 0.0) -> list[Model]:
+    """The task's models that can take a request of about `tokens` (and `audio` seconds of speech)
+    now, in order of preference. Raises AllModelsBusy (with the shortest wait) if none can."""
     ready, waits, reasons = [], [], []
     for model in candidates(task_name):
         if model.key in exclude:  # already failed this request; it counts only for the wait
             waits.append(limiter.blocked_for(model.key) or 1.0)
             reasons.append(f"{model.label}: failed this request")
             continue
-        ok, reason, wait = limiter.check(model.key, tokens)
+        ok, reason, wait = limiter.check(model.key, tokens, audio)
         if ok:
             ready.append(model)
         else:
@@ -143,20 +143,21 @@ def available(task_name: str, tokens: int, exclude: set[str] = frozenset()) -> l
     return ready
 
 
-def reserve(model: Model, tokens: int) -> Reservation:
-    return limiter.reserve(model.key, tokens)
+def reserve(model: Model, tokens: int, audio: float = 0.0) -> Reservation:
+    return limiter.reserve(model.key, tokens, audio)
 
 
 def served(task_name: str, model: Model, purpose: str, usage, reservation: Reservation | None = None,
-           headers=None) -> int:
-    """A finished request: records its actual tokens, syncs budgets from the provider's headers, and
-    logs which provider and model served it with the budget left. Returns its total tokens."""
+           headers=None, audio_seconds: float | None = None) -> int:
+    """A finished request: records its actual tokens (or audio seconds), syncs budgets from the
+    provider's headers, and logs which provider and model served it with the budget left. Returns
+    its total tokens."""
     prompt, completion, total = _counts(usage)
     if reservation:
-        limiter.finish(reservation, total)
+        limiter.finish(reservation, total, audio_seconds)
     limiter.sync_headers(model.key, headers)
-    log.info("router: %s (%s) served by %s: %d in + %d out = %d tokens | left %s",
-             task_name, purpose, model.label, prompt, completion, total, _budget(model))
+    used = f"{audio_seconds:.1f}s of audio" if audio_seconds is not None else f"{prompt} in + {completion} out = {total} tokens"
+    log.info("router: %s (%s) served by %s: %s | left %s", task_name, purpose, model.label, used, _budget(model))
     return total
 
 
@@ -198,8 +199,8 @@ class Failover:
     gets one second chance (after a second's pause) if nothing else is free, so a single-model task
     survives a brief blip. Raises AllModelsBusy when no model is left."""
 
-    def __init__(self, task_name: str, tokens: int):
-        self.task, self.tokens = task_name, tokens
+    def __init__(self, task_name: str, tokens: int, audio: float = 0.0):
+        self.task, self.tokens, self.audio = task_name, tokens, audio
         self.limited: set[str] = set()
         self.broken: set[str] = set()
         self.second_chance = False
@@ -208,7 +209,7 @@ class Failover:
 
     async def next(self) -> Model:
         try:
-            model = available(self.task, self.tokens, exclude=self.limited | self.broken)[0]
+            model = available(self.task, self.tokens, exclude=self.limited | self.broken, audio=self.audio)[0]
         except AllModelsBusy:
             if not self.broken or self.second_chance:
                 raise
@@ -216,7 +217,7 @@ class Failover:
             self.broken.clear()
             log.info("router: %s retrying a failed model once", self.task)
             await asyncio.sleep(1)
-            model = available(self.task, self.tokens, exclude=self.limited)[0]
+            model = available(self.task, self.tokens, exclude=self.limited, audio=self.audio)[0]
         if self.previous is not None:
             log.warning("router: %s failover %s -> %s (%s)", self.task, self.previous.label, model.label, self.why)
             record_event("failover", self.task, model.label, f"from {self.previous.label} ({self.why})")
@@ -252,7 +253,7 @@ def status() -> dict:
         models.append({
             "key": key, "label": model.label, "provider": model.provider.name,
             "personal_data": model.provider.allow_personal_data, "has_key": model.provider.client is not None,
-            "limits": {k: model.limits.get(k) for k in ("rpm", "tpm", "rpd", "tpd")},
+            "limits": {k: model.limits.get(k) for k in ("rpm", "tpm", "rpd", "tpd", "ash", "asd")},
             "remaining": limiter.remaining(key),
             "cooldown_seconds": round(max(0.0, st.cooldown_until - now)),
             "cooldown_reason": st.cooldown_reason if st.cooldown_until > now else "",
@@ -275,7 +276,10 @@ def status() -> dict:
 
 def _budget(model: Model) -> str:
     left = limiter.remaining(model.key)
-    part = lambda n, unit: "∞" if n is None else f"{n:,} {unit}"
+    part = lambda n, unit: "∞" if n is None else f"{n:,.0f} {unit}"
+    if model.can("transcription"):  # speech-to-text: requests and audio seconds
+        return (f"minute {part(left['minute_requests'], 'req')}, hour {part(left['hour_audio'], 's audio')}, "
+                f"day {part(left['day_requests'], 'req')} / {part(left['day_audio'], 's audio')}")
     return (f"minute {part(left['minute_tokens'], 'tok')} / {part(left['minute_requests'], 'req')}, "
             f"day {part(left['day_tokens'], 'tok')} / {part(left['day_requests'], 'req')}")
 

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import db
-from app.api import auth, brief, chat, health, memory, push, tts, usage
+from app.api import auth, brief, chat, health, memory, push, transcribe, tts, usage
 from app.core.config import ENABLE_DOCS
 from app.llm import embeddings, router
 from app.services import scheduler
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
 docs = {} if ENABLE_DOCS else {"docs_url": None, "redoc_url": None, "openapi_url": None}
 app = FastAPI(title="Personal Assistant", lifespan=lifespan, **docs)
 app.middleware("http")(auth.require_login)
-for module in (auth, chat, memory, push, brief, tts, usage, health):
+for module in (auth, chat, memory, push, brief, tts, transcribe, usage, health):
     app.include_router(module.router)
 
 # Last, so API routes take precedence over the static files

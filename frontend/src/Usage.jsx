@@ -6,6 +6,7 @@ const REFRESH_MS = 10000;
 
 const TASK_LABELS = {
   chat_tools: "Chat",
+  transcribe: "Voice input",
   background_json: "Memory",
   titles: "Titles",
   morning_brief: "Morning brief",
@@ -19,7 +20,7 @@ const EVENT_LABELS = {
   interrupted: "Reply cut off",
 };
 
-const number = (n) => (n >= 10000 ? `${Math.round(n / 1000)}K` : n.toLocaleString());
+const number = (n) => (n >= 10000 ? `${Math.round(n / 1000)}K` : Math.round(n).toLocaleString());
 
 function duration(seconds) {
   if (seconds < 90) return `${seconds}s`;
@@ -66,12 +67,22 @@ function ModelCard({ model }) {
         </div>
         <span className={`usage-state ${state.kind}`}>{state.text}</span>
       </div>
-      <div className="usage-meters">
-        <Meter label="Tokens this minute" used={usedNow(limits.tpm, remaining.minute_tokens)} limit={limits.tpm} />
-        <Meter label="Requests this minute" used={usedNow(limits.rpm, remaining.minute_requests)} limit={limits.rpm} />
-        <Meter label="Tokens today" used={today.tokens} limit={limits.tpd} />
-        <Meter label="Requests today" used={today.requests} limit={limits.rpd} />
-      </div>
+      {limits.ash != null || limits.asd != null ? (
+        // Speech-to-text: budgets are requests and seconds of audio, not tokens
+        <div className="usage-meters">
+          <Meter label="Requests this minute" used={usedNow(limits.rpm, remaining.minute_requests)} limit={limits.rpm} />
+          <Meter label="Audio seconds this hour" used={usedNow(limits.ash, remaining.hour_audio)} limit={limits.ash} />
+          <Meter label="Requests today" used={today.requests} limit={limits.rpd} />
+          <Meter label="Audio seconds today" used={today.audio_seconds || 0} limit={limits.asd} />
+        </div>
+      ) : (
+        <div className="usage-meters">
+          <Meter label="Tokens this minute" used={usedNow(limits.tpm, remaining.minute_tokens)} limit={limits.tpm} />
+          <Meter label="Requests this minute" used={usedNow(limits.rpm, remaining.minute_requests)} limit={limits.rpm} />
+          <Meter label="Tokens today" used={today.tokens} limit={limits.tpd} />
+          <Meter label="Requests today" used={today.requests} limit={limits.rpd} />
+        </div>
+      )}
     </div>
   );
 }

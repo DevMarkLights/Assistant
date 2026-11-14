@@ -29,7 +29,8 @@ providers:
     # No rate_limit_headers: Gemini doesn't document any; our counts and 429 cooldowns cover it.
 
 # Each model: its provider, the id the provider expects, what it can do, its free-tier limits
-# (per minute / per day: requests and tokens; null = no limit), and extra request options.
+# (rpm/tpm: requests and tokens per minute, rpd/tpd: per day, ash/asd: audio seconds per hour/day
+# for speech-to-text; null or missing = no limit), and extra request options.
 models:
   gpt-oss-120b:
     provider: groq
@@ -43,6 +44,18 @@ models:
     capabilities: {tools: true, json_mode: true, vision: false, context_length: 131072}
     limits: {rpm: 30, tpm: 8000, rpd: 1000, tpd: 200000}
     options: {reasoning_effort: low}
+  # Speech-to-text for voice mode (audio in, text out). Free-tier limits from the owner's Groq
+  # console, 2026-11-14: 20 RPM, 2K RPD, and audio seconds: 7.2K per hour (ash), 28.8K per day (asd).
+  whisper-large-v3-turbo:
+    provider: groq
+    id: whisper-large-v3-turbo
+    capabilities: {transcription: true}
+    limits: {rpm: 20, tpm: null, rpd: 2000, tpd: null, ash: 7200, asd: 28800}
+  whisper-large-v3:
+    provider: groq
+    id: whisper-large-v3
+    capabilities: {transcription: true}
+    limits: {rpm: 20, tpm: null, rpd: 2000, tpd: null, ash: 7200, asd: 28800}
   # Gemini limits: the free tier for this project, as shown in Google AI Studio on 2026-11-13
   # (Google no longer publishes a table). Capabilities: Google's OpenAI-compatibility docs
   # (https://ai.google.dev/gemini-api/docs/openai; tools, JSON mode and image input supported, still
@@ -83,6 +96,11 @@ tasks:
     needs: [json_mode]
     max_output: 100
     models: [gpt-oss-20b, gemini-3.5-flash-lite]  # Gemini serves titles when 20b can't
+  transcribe:  # voice mode: the user's recorded speech to text (your voice is personal data)
+    personal_data: true
+    needs: [transcription]
+    max_output: 0
+    models: [whisper-large-v3-turbo, whisper-large-v3]
   morning_brief:
     personal_data: true
     needs: [json_mode]

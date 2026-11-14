@@ -19,17 +19,19 @@ async def yesterday_line(now: datetime | None = None) -> str:
     end = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     start = end - timedelta(days=1)
     usage = await db.llm_usage_for_day(start.strftime("%Y-%m-%d"))
-    if not any(requests for requests, _ in usage.values()):
+    if not any(u["requests"] for u in usage.values()):
         return ""
     label = lambda key: providers.config.models[key].id.rsplit("/", 1)[-1] if key in providers.config.models else key
-    busiest = sorted(usage.items(), key=lambda kv: -kv[1][0])
-    per_model = ", ".join(f"{label(k)} {r}" for k, (r, _) in busiest if r)
-    total_requests = sum(r for r, _ in usage.values())
-    total_tokens = sum(t for _, t in usage.values())
+    busiest = sorted(usage.items(), key=lambda kv: -kv[1]["requests"])
+    per_model = ", ".join(f"{label(k)} {u['requests']}" for k, u in busiest if u["requests"])
+    total_requests = sum(u["requests"] for u in usage.values())
+    total_tokens = sum(u["tokens"] for u in usage.values())
+    audio_minutes = sum(u.get("audio_seconds", 0) for u in usage.values()) / 60
     events = await db.llm_events_between(start, end)
     count = lambda kind: sum(1 for e in events if e["kind"] == kind)
     trouble = [f"{n} {what}" for n, what in ((count("failover"), "fallback(s)"), (count("rate_limited"), "rate limit(s)"),
                                              (count("busy"), "time(s) all models were busy"),
                                              (count("interrupted"), "cut-off reply(ies)")) if n]
-    return (f"AI usage yesterday: {total_requests} requests, {_tokens(total_tokens)} tokens ({per_model}); "
+    audio = f", {audio_minutes:.0f} min of voice transcribed" if audio_minutes >= 1 else ""
+    return (f"AI usage yesterday: {total_requests} requests, {_tokens(total_tokens)} tokens{audio} ({per_model}); "
             + (", ".join(trouble) if trouble else "no fallbacks") + ".")

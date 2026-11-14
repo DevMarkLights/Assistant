@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { audioSettled, openMic, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
+import { MicError, audioSettled, listenOnce, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
 import VoiceVisual from "./VoiceVisual";
 
 const PHASE_LABEL = {
@@ -11,9 +11,9 @@ const PHASE_LABEL = {
 
 // Full-screen voice conversation over the chat: listen -> send -> speak the reply -> listen again.
 // Messages go through the normal chat pipeline (sendMessage), so they also appear in the chat.
-// It keeps going hands-free until closed. The mic stays on for the whole session (openMic); its
-// words only count while listening. A failed reply is shown while it listens again; only a
-// microphone error stops it.
+// It keeps going hands-free until closed. Each turn records what the user says (listenOnce: the mic
+// is open only while listening) and has the server transcribe it. A failed transcription or reply
+// is shown while it listens again; only a microphone error stops it.
 export default function VoiceMode({ sendMessage, onClose }) {
   const [phase, setPhase] = useState("listening");
   const [look] = useState(savedLook); // wave or orb, chosen in Settings
@@ -27,40 +27,44 @@ export default function VoiceMode({ sendMessage, onClose }) {
   const bump = useCallback(() => setActivity((n) => n + 1), []);
   const replyRef = useRef(null);
   const closed = useRef(false);
-  const mic = useRef(null); // the session's always-on mic (openMic)
-  const micFailed = useRef(false);
+  const take = useRef(null); // the current listenOnce: stop() sends it now, abort() drops it
   const running = useRef(false); // one conversation loop at a time
-
-  const startMic = useCallback(() => {
-    micFailed.current = false;
-    mic.current = openMic((message) => {
-      micFailed.current = true;
-      setError(message);
-    }, setMicStage);
-  }, []);
+  const lastBump = useRef(0);
 
   // Conversation loop: listen, send, speak, repeat, until closed
   const conversation = useCallback(async () => {
-    let spoke = false; // a reply was just spoken (or interrupted)
     while (!closed.current) {
       setStatus(null);
       setHeard("");
+      setMicStage(null);
       setPhase("listening");
+      // Don't open the mic while audio is still playing (the unlock clip, or the reply just spoken)
       await audioSettled();
       if (closed.current) return;
-      // Open the session's mic only now, after the unlock clip has finished: on iOS, starting
-      // recognition while audio is playing leaves the mic "on" but hearing nothing
-      if (!mic.current) startMic();
-      // After a spoken reply, a fresh recognizer: on iOS the playback leaves the running one deaf
-      else if (spoke) mic.current.renew();
-      spoke = false;
-      const text = await mic.current.listen((words) => {
-        setHeard(words);
-        setError(null);
-        bump();
-      });
+      let text;
+      try {
+        take.current = listenOnce({
+          onStage: setMicStage,
+          onLevel: (level) => {
+            // Animate with the voice: a bump at most every 120 ms while it's loud
+            const now = performance.now();
+            if (level > 0.3 && now - lastBump.current > 120) {
+              lastBump.current = now;
+              bump();
+            }
+          },
+        });
+        text = await take.current.done;
+      } catch (e) {
+        if (closed.current) return;
+        setError(e.message);
+        if (e instanceof MicError) return setPhase("error"); // needs the user (permission)
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // transcription failed: listen again
+        continue;
+      } finally {
+        take.current = null;
+      }
       if (closed.current) return;
-      if (micFailed.current) return setPhase("error");
       if (!text) continue;
       setError(null);
 
@@ -97,9 +101,8 @@ export default function VoiceMode({ sendMessage, onClose }) {
           });
         },
       });
-      spoke = true;
     }
-  }, [sendMessage, bump, startMic]);
+  }, [sendMessage, bump]);
 
   // Starts the loop unless it's already running (a second loop would open a second mic)
   const converse = useCallback(async () => {
@@ -119,15 +122,14 @@ export default function VoiceMode({ sendMessage, onClose }) {
     converse();
     return () => {
       closed.current = true;
-      mic.current?.close();
-      mic.current = null;
+      take.current?.abort();
       stopSpeaking();
     };
   }, [converse]);
 
   const close = useCallback(() => {
     closed.current = true;
-    mic.current?.close();
+    take.current?.abort();
     stopSpeaking();
     onClose();
   }, [onClose]);
@@ -146,13 +148,11 @@ export default function VoiceMode({ sendMessage, onClose }) {
   }, [close]);
 
   function tapOrb() {
-    if (phase === "listening") mic.current?.finish(); // done talking: send now
+    if (phase === "listening") take.current?.stop(); // done talking: send now
     else if (phase === "speaking") {
       stopSpeaking(); // interrupt; the turn loop then listens again
     } else if (phase === "error") {
       setError(null);
-      mic.current?.close();
-      mic.current = null; // the loop opens a fresh one
       converse();
     }
   }

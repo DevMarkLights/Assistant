@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 WINDOW = 60.0  # seconds in the per-minute window
+HOUR = 3600.0  # seconds in the per-hour window (audio seconds for speech-to-text)
 DEFAULT_COOLDOWN = 60.0  # a 429 that doesn't say when to retry
 MAX_COOLDOWN = 24 * 3600.0
 PROVIDER_ERRORS = 3  # consecutive server/connection errors that sideline a provider
@@ -58,6 +59,8 @@ class Reservation:
     started: float
     tokens: int
     entry: list  # [time, tokens] inside the model's minute window, updated when the request finishes
+    audio: float = 0.0  # seconds of audio (speech-to-text), estimated until the request finishes
+    audio_entry: list | None = None  # [time, seconds] inside the hour window
     done: bool = False
 
 
@@ -67,6 +70,8 @@ class ModelState:
     day: str = ""
     day_requests: int = 0
     day_tokens: int = 0
+    hour_audio: deque = field(default_factory=deque)  # [time, audio seconds] per transcription
+    day_audio: float = 0.0
     cooldown_until: float = 0.0
     cooldown_reason: str = ""
 
@@ -78,10 +83,12 @@ class ProviderState:
 
 
 class Limiter:
-    """`limits`: model key -> {"rpm", "tpm", "rpd", "tpd"} (None/missing = unlimited).
+    """`limits`: model key -> {"rpm", "tpm", "rpd", "tpd", "ash", "asd"} (None/missing = unlimited;
+    ash/asd are audio seconds per hour/day, for speech-to-text models).
     `providers`: model key -> provider name. `header_scopes`: provider -> {"requests": "minute"|"day",
     "tokens": "minute"|"day"}, saying what its x-ratelimit-* headers count (no entry = ignore them).
-    `on_record(model, day, requests, tokens)` is called for each finished request (for persistence)."""
+    `on_record(model, day, requests, tokens, audio_seconds)` is called for each finished request (for
+    persistence)."""
 
     def __init__(self, limits: dict[str, dict], providers: dict[str, str], header_scopes: dict | None = None,
                  clock=None, on_record: Callable | None = None):
@@ -100,23 +107,28 @@ class Limiter:
         now = self.clock.now()
         while st.minute and st.minute[0][0] <= now - WINDOW:
             st.minute.popleft()
+        while st.hour_audio and st.hour_audio[0][0] <= now - HOUR:
+            st.hour_audio.popleft()
         today = day_of(now)
         if st.day != today:
-            st.day, st.day_requests, st.day_tokens = today, 0, 0
+            st.day, st.day_requests, st.day_tokens, st.day_audio = today, 0, 0, 0.0
         return st
 
-    def load_day(self, day: str, counts: dict[str, tuple[int, int]]) -> None:
-        """Restores today's totals (from Mongo at startup): model -> (requests, tokens)."""
-        for model, (requests, tokens) in counts.items():
+    def load_day(self, day: str, counts: dict[str, dict]) -> None:
+        """Restores today's totals (from Mongo at startup): model -> {requests, tokens, audio_seconds}."""
+        for model, c in counts.items():
             if model in self.models:
                 st = self._state(model)
                 if st.day == day:
-                    st.day_requests, st.day_tokens = max(st.day_requests, requests), max(st.day_tokens, tokens)
+                    st.day_requests = max(st.day_requests, c.get("requests", 0))
+                    st.day_tokens = max(st.day_tokens, c.get("tokens", 0))
+                    st.day_audio = max(st.day_audio, c.get("audio_seconds", 0.0))
 
     # --- budgets ---
 
     def remaining(self, model: str) -> dict:
-        """Budget left now: requests and tokens per minute and per day (None = unlimited)."""
+        """Budget left now: requests and tokens per minute and per day, and audio seconds per hour and
+        per day (None = unlimited)."""
         st = self._state(model)
         lim = self.limits[model]
         left = lambda limit, used: None if limit is None else max(0, limit - used)
@@ -125,6 +137,8 @@ class Limiter:
             "minute_tokens": left(lim.get("tpm"), sum(t for _, t in st.minute)),
             "day_requests": left(lim.get("rpd"), st.day_requests),
             "day_tokens": left(lim.get("tpd"), st.day_tokens),
+            "hour_audio": left(lim.get("ash"), round(sum(a for _, a in st.hour_audio), 1)),
+            "day_audio": left(lim.get("asd"), round(st.day_audio, 1)),
         }
 
     def blocked_for(self, model: str) -> float:
@@ -134,8 +148,9 @@ class Limiter:
         provider = self.provider_state[self.providers[model]]
         return max(0.0, st.cooldown_until - now, provider.sidelined_until - now)
 
-    def check(self, model: str, tokens: int) -> tuple[bool, str, float]:
-        """Whether a request of about `tokens` fits now: (ok, reason if not, seconds until it might)."""
+    def check(self, model: str, tokens: int, audio: float = 0.0) -> tuple[bool, str, float]:
+        """Whether a request of about `tokens` (and `audio` seconds of speech) fits now: (ok, reason if
+        not, seconds until it might)."""
         if wait := self.blocked_for(model):
             now, st = self.clock.now(), self.models[model]
             reason = st.cooldown_reason if st.cooldown_until > now else "provider sidelined after repeated errors"
@@ -155,31 +170,45 @@ class Limiter:
             tpm = self.limits[model].get("tpm")
             if tokens > tpm:  # bigger than a whole minute's budget: it can never fit
                 return False, f"request (~{tokens} tokens) exceeds the {tpm}/minute limit", float("inf")
-            return False, "per-minute tokens used up", self._tokens_free_in(st, tokens, tpm, now)
+            return False, "per-minute tokens used up", self._frees_in(st.minute, tokens, tpm, now, WINDOW)
+        if audio:
+            if left["day_audio"] is not None and left["day_audio"] < audio:
+                return False, "daily audio seconds used up", tomorrow
+            if left["hour_audio"] is not None and left["hour_audio"] < audio:
+                ash = self.limits[model].get("ash")
+                if audio > ash:
+                    return False, f"recording (~{audio:.0f}s) exceeds the {ash}s/hour limit", float("inf")
+                return False, "hourly audio seconds used up", self._frees_in(st.hour_audio, audio, ash, now, HOUR)
         return True, "", 0.0
 
     @staticmethod
-    def _tokens_free_in(st: ModelState, tokens: int, tpm: int, now: float) -> float:
-        used = sum(t for _, t in st.minute)
-        for t, n in st.minute:  # oldest first: when enough has aged out
+    def _frees_in(window: deque, amount: float, limit: float, now: float, span: float) -> float:
+        """Seconds until enough of a sliding window ages out for `amount` to fit under `limit`."""
+        used = sum(n for _, n in window)
+        for t, n in window:  # oldest first
             used -= n
-            if tpm - used >= tokens:
-                return max(0.0, t + WINDOW - now)
-        return WINDOW
+            if limit - used >= amount:
+                return max(0.0, t + span - now)
+        return span
 
     # --- requests ---
 
-    def reserve(self, model: str, tokens: int) -> Reservation:
+    def reserve(self, model: str, tokens: int, audio: float = 0.0) -> Reservation:
         st = self._state(model)
         now = self.clock.now()
         entry = [now, tokens]
         st.minute.append(entry)
         st.day_requests += 1
         st.day_tokens += tokens
-        return Reservation(model, now, tokens, entry)
+        audio_entry = None
+        if audio:
+            audio_entry = [now, audio]
+            st.hour_audio.append(audio_entry)
+            st.day_audio += audio
+        return Reservation(model, now, tokens, entry, audio, audio_entry)
 
-    def finish(self, res: Reservation, actual_tokens: int | None) -> None:
-        """Replaces the reservation's estimate with the actual count (keeps the estimate if the
+    def finish(self, res: Reservation, actual_tokens: int | None, actual_audio: float | None = None) -> None:
+        """Replaces the reservation's estimates with the actual counts (keeps an estimate if the
         provider reported none)."""
         if res.done:
             return
@@ -187,12 +216,18 @@ class Limiter:
         st = self._state(res.model)
         actual = actual_tokens if actual_tokens else res.tokens
         res.entry[1] = actual
+        audio = actual_audio if actual_audio is not None else res.audio
+        if res.audio_entry is not None:
+            res.audio_entry[1] = audio
+        elif audio:
+            st.hour_audio.append([res.started, audio])
         if day_of(res.started) == st.day:
             st.day_tokens += actual - res.tokens
+            st.day_audio += audio - res.audio
         provider = self.provider_state[self.providers[res.model]]
         provider.errors = 0
         if self.on_record:
-            self.on_record(res.model, day_of(res.started), 1, actual)
+            self.on_record(res.model, day_of(res.started), 1, actual, audio)
 
     def release(self, res: Reservation) -> None:
         """A request that failed before using anything (e.g. a 429): undo its reservation."""
@@ -202,9 +237,12 @@ class Limiter:
         st = self._state(res.model)
         if res.entry in st.minute:
             st.minute.remove(res.entry)
+        if res.audio_entry is not None and res.audio_entry in st.hour_audio:
+            st.hour_audio.remove(res.audio_entry)
         if day_of(res.started) == st.day:
             st.day_requests -= 1
             st.day_tokens -= res.tokens
+            st.day_audio -= res.audio
 
     # --- provider feedback ---
 

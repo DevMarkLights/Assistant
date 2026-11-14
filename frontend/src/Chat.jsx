@@ -7,7 +7,7 @@ import Memory from "./Memory";
 import Settings from "./Settings";
 import Usage from "./Usage";
 import VoiceMode from "./VoiceMode";
-import { recognitionSupported, unlockSpeech } from "./speech";
+import { unlockMic, unlockSpeech, voiceInputSupported } from "./speech";
 import { useTheme } from "./theme";
 
 const mobile = window.matchMedia("(max-width: 768px)");
@@ -419,7 +419,8 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
   const [voiceOpen, setVoiceOpen] = useState(false);
 
   function openVoice() {
-    unlockSpeech(); // iOS only allows speech after a tap; this is that tap
+    unlockSpeech(); // iOS only allows speech and audio processing after a tap; this is that tap
+    unlockMic();
     setView("chat");
     setVoiceOpen(true);
   }
@@ -606,7 +607,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
                 autoFocus={!mobile.matches}
                 enterKeyHint="send"
               />
-              {recognitionSupported && (
+              {voiceInputSupported && (
                 <button type="button" className="icon-button mic-button" onClick={openVoice} disabled={busy}
                   aria-label="Talk to the assistant" title="Voice mode">
                   <MicIcon />

@@ -91,7 +91,8 @@ def test_concurrent_reservations_cannot_overspend():
 def test_release_undoes_a_failed_request():
     lim, _ = make({"m": {"tpm": 1000, "rpd": 5}})
     lim.release(lim.reserve("m", 700))
-    assert lim.remaining("m") == {"minute_requests": None, "minute_tokens": 1000, "day_requests": 5, "day_tokens": None}
+    assert lim.remaining("m") == {"minute_requests": None, "minute_tokens": 1000, "day_requests": 5, "day_tokens": None,
+                                  "hour_audio": None, "day_audio": None}
 
 
 def test_missing_usage_keeps_the_estimate():
@@ -104,7 +105,7 @@ def test_finished_requests_are_reported_for_persistence():
     records = []
     lim, clock = make({"m": {"tpm": 1000}}, records=records)
     use(lim, "m", 300, actual=250)
-    assert records == [("m", day_of(clock.now()), 1, 250)]
+    assert records == [("m", day_of(clock.now()), 1, 250, 0.0)]
 
 
 # --- daily limits ---
@@ -130,14 +131,14 @@ def test_daily_tokens():
 
 def test_load_day_restores_counts_after_a_restart():
     lim, clock = make({"m": {"rpd": 1000, "tpd": 200000}})
-    lim.load_day(day_of(clock.now()), {"m": (990, 150_000), "unknown-model": (1, 1)})
+    lim.load_day(day_of(clock.now()), {"m": {"requests": 990, "tokens": 150_000}, "unknown-model": {"requests": 1}})
     assert lim.remaining("m")["day_requests"] == 10
     assert lim.remaining("m")["day_tokens"] == 50_000
 
 
 def test_yesterdays_counts_are_not_loaded_as_today():
     lim, clock = make({"m": {"rpd": 1000}})
-    lim.load_day(day_of(clock.now() - DAY), {"m": (990, 0)})
+    lim.load_day(day_of(clock.now() - DAY), {"m": {"requests": 990, "tokens": 0}})
     assert lim.remaining("m")["day_requests"] == 1000
 
 
@@ -223,6 +224,63 @@ def test_garbage_headers_are_ignored():
     lim, _ = make(header_scopes=GROQ_SCOPES)
     lim.sync_headers("big", {"x-ratelimit-remaining-tokens": "lots"})
     assert lim.remaining("big")["minute_tokens"] == 8000
+
+
+# --- audio seconds (speech-to-text) ---
+
+WHISPER = {"w": {"rpm": 20, "rpd": 2000, "ash": 7200, "asd": 28800}}
+
+
+def test_audio_seconds_per_hour_slide_out_after_an_hour():
+    lim, clock = make(WHISPER)
+    lim.finish(lim.reserve("w", 0, 7000), None, 7000)
+    clock.advance(600)
+    ok, reason, wait = lim.check("w", 0, 300)
+    assert not ok and reason == "hourly audio seconds used up"
+    assert wait == pytest.approx(3000)  # the 7000s ages out an hour after it was used
+    assert lim.check("w", 0, 200)[0]  # a shorter clip still fits
+    clock.advance(3000.1)
+    assert lim.remaining("w")["hour_audio"] == 7200
+
+
+def test_audio_seconds_per_day():
+    lim, clock = make(WHISPER)
+    for _ in range(4):
+        lim.finish(lim.reserve("w", 0, 7000), None, 7000)
+        clock.advance(HOUR_PLUS)
+    ok, reason, _ = lim.check("w", 0, 1000)
+    assert not ok and reason == "daily audio seconds used up"
+    assert lim.check("w", 0, 800)[0]
+
+
+def test_whisper_s_measured_duration_replaces_the_estimate():
+    records = []
+    lim, clock = make(WHISPER, records=records)
+    lim.finish(lim.reserve("w", 0, 12.0), None, 9.5)
+    assert lim.remaining("w")["hour_audio"] == pytest.approx(7190.5)
+    assert lim.remaining("w")["day_audio"] == pytest.approx(28790.5)
+    assert records == [("w", day_of(clock.now()), 1, 0, 9.5)]
+
+
+def test_a_failed_transcription_gives_its_audio_seconds_back():
+    lim, _ = make(WHISPER)
+    lim.release(lim.reserve("w", 0, 60))
+    assert lim.remaining("w")["hour_audio"] == 7200 and lim.remaining("w")["day_audio"] == 28800
+
+
+def test_a_recording_longer_than_an_hour_s_budget_never_fits():
+    lim, _ = make(WHISPER)
+    ok, reason, wait = lim.check("w", 0, 8000)
+    assert not ok and "exceeds" in reason and math.isinf(wait)
+
+
+def test_audio_restored_after_a_restart():
+    lim, clock = make(WHISPER)
+    lim.load_day(day_of(clock.now()), {"w": {"requests": 10, "tokens": 0, "audio_seconds": 28000}})
+    assert lim.remaining("w")["day_audio"] == 800
+
+
+HOUR_PLUS = 3601
 
 
 # --- durations ---

@@ -21,7 +21,6 @@ async def usage(user: dict = Depends(current_user)):
     # per-minute numbers and cooldowns are this server's own
     today = await db.llm_usage_for_day(state["day"])
     for model in state["models"]:
-        requests, tokens = today.get(model["key"], (0, 0))
-        model["used_today"] = {"requests": requests, "tokens": tokens}
+        model["used_today"] = today.get(model["key"], {"requests": 0, "tokens": 0, "audio_seconds": 0.0})
     state["events"] = await db.recent_llm_events(50)
     return state
