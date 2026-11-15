@@ -340,24 +340,35 @@ function wordAt(words, progress) {
 // first one is generated instead of after the whole reply. The first piece is kept shorter
 // (`firstMax`): its generation time is the wait before the first word; later pieces are generated
 // while earlier ones play.
-export function chunkText(text, max = 220, firstMax = 120) {
+//
+// Each piece is generated while the one before it plays, so a piece may be at most `growth` times
+// as long as the previous one (Piper on the Pi generates about 4x faster than real time). Without
+// this, a short first sentence ("Sure, here's one.", 0.9 s of audio) followed by a 160-character
+// piece (2.2 s to generate) left a gap of over a second after the first sentence.
+export function chunkText(text, max = 220, firstMax = 120, growth = 2.5, minPiece = 50) {
   if (text.trim().length <= firstMax) return [text.trim()]; // short replies: one request
   const sentences = text.match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) || [text];
   const chunks = [];
+  // The longest piece i may be
+  const cap = (i) => (i === 0 ? firstMax : Math.min(max, Math.max(minPiece, Math.round(chunks[i - 1].length * growth))));
   for (let sentence of sentences.map((x) => x.trim()).filter(Boolean)) {
-    const limit = () => (chunks.length ? max : firstMax);
-    while (sentence.length > limit()) {
-      const lim = limit();
-      // An overlong sentence: break at the last comma or space before the limit
-      const cut = Math.max(sentence.lastIndexOf(", ", lim), sentence.lastIndexOf(" ", lim));
-      const at = cut > lim / 2 ? cut + 1 : lim;
+    const n = chunks.length;
+    // Add the sentence to the last piece if it still fits that piece's cap (never to the first
+    // piece: it should be ready as soon as possible)
+    if (n > 1 && chunks[n - 1].length + sentence.length + 1 <= cap(n - 1)) {
+      chunks[n - 1] = `${chunks[n - 1]} ${sentence}`;
+      continue;
+    }
+    while (sentence.length > cap(chunks.length)) {
+      const lim = cap(chunks.length);
+      // An overlong sentence: break after the last comma before the limit, else at the last space
+      const comma = sentence.lastIndexOf(", ", lim);
+      const cut = comma > lim / 3 ? comma + 1 : sentence.lastIndexOf(" ", lim);
+      const at = cut > lim / 3 ? cut + 1 : lim;
       chunks.push(sentence.slice(0, at).trim());
       sentence = sentence.slice(at).trim();
     }
-    const last = chunks[chunks.length - 1];
-    // Never grow the first piece: it should be ready as soon as possible
-    if (last && chunks.length > 1 && last.length + sentence.length + 1 <= max) chunks[chunks.length - 1] = `${last} ${sentence}`;
-    else if (sentence) chunks.push(sentence);
+    if (sentence) chunks.push(sentence);
   }
   return chunks;
 }
