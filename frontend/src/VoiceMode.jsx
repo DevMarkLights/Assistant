@@ -30,6 +30,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
   const take = useRef(null); // the current listenOnce: stop() sends it now, abort() drops it
   const running = useRef(false); // one conversation loop at a time
   const lastBump = useRef(0);
+  const lastTiming = useRef(null); // how long the previous turn's steps took, for the server log
 
   // Conversation loop: listen, send, speak, repeat, until closed
   const conversation = useCallback(async () => {
@@ -42,9 +43,14 @@ export default function VoiceMode({ sendMessage, onClose }) {
       await audioSettled();
       if (closed.current) return;
       let text;
+      const marks = {}; // when each step of this turn happened (performance.now), for lastTiming
       try {
         take.current = listenOnce({
-          onStage: setMicStage,
+          timing: lastTiming.current,
+          onStage: (stage) => {
+            if (stage === "transcribing…") marks.stopped = performance.now();
+            setMicStage(stage);
+          },
           onLevel: (level) => {
             // Animate with the voice: a bump at most every 120 ms while it's loud
             const now = performance.now();
@@ -66,6 +72,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
       }
       if (closed.current) return;
       if (!text) continue;
+      marks.transcribed = performance.now();
       setError(null);
 
       setHeard(text);
@@ -75,13 +82,17 @@ export default function VoiceMode({ sendMessage, onClose }) {
       const { error: failed } = await sendMessage(text, {
         voice: true,
         onEvent: (ev) => {
-          if (ev.type === "text") answer += ev.text;
+          if (ev.type === "text") {
+            answer += ev.text;
+            marks.firstText ??= performance.now();
+          }
           else if (ev.type === "retract") answer = answer.slice(0, Math.max(0, answer.length - ev.chars));
           else if (ev.type === "tool_start") setStatus(`${ev.label}…`);
           else if (ev.type === "tool_end") setStatus(ev.summary);
           if (!closed.current) setReply(speakable(answer));
         },
       });
+      marks.replyDone = performance.now();
       if (closed.current) return;
       if (failed || !answer.trim()) {
         // Shown while it listens again, until the next words are heard
@@ -91,9 +102,11 @@ export default function VoiceMode({ sendMessage, onClose }) {
 
       setSpokenWord(-1);
       setPhase("speaking");
+      marks.speak = performance.now();
       // resolves early if interrupted, then we listen again
       await speak(speakable(answer), {
         onWord: (i) => {
+          marks.sound ??= performance.now(); // the first word is playing
           if (closed.current) return;
           setSpokenWord((prev) => {
             if (prev !== i) bump();
@@ -101,6 +114,11 @@ export default function VoiceMode({ sendMessage, onClose }) {
           });
         },
       });
+      // Sent with the next recording, so the server log shows where this turn's time went
+      const since = (from, to) => (marks[from] != null && marks[to] != null ? `${((marks[to] - marks[from]) / 1000).toFixed(1)}s` : "-");
+      lastTiming.current = `transcription ${since("stopped", "transcribed")}, first words ${since("transcribed", "firstText")}, `
+        + `reply done ${since("transcribed", "replyDone")}, until speaking ${since("replyDone", "speak")}, `
+        + `until sound ${since("speak", "sound")} (${speakable(answer).length} chars)`;
     }
   }, [sendMessage, bump]);
 

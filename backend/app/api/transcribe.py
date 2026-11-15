@@ -18,7 +18,9 @@ MAX_BYTES = 10 * 1024 * 1024  # ~10 minutes of compressed speech; Groq's free ti
 
 @router.post("")
 async def transcribe(audio: UploadFile, language: str | None = Form(None), seconds: float = Form(0.0),
-                     user: dict = Depends(current_user)):
+                     timing: str | None = Form(None), user: dict = Depends(current_user)):
+    if timing:  # the browser's own measurements of the previous voice turn
+        log.info("voice timing (previous turn) for %s: %s", user["username"], timing[:300])
     if llm_router.limiter is None:
         raise HTTPException(status_code=503, detail="Voice input needs the cloud models (LOCAL=false).")
     data = await audio.read(MAX_BYTES + 1)

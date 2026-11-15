@@ -76,11 +76,12 @@ export function closeMicSession() {
   sessionStream = null;
 }
 
-// Records one utterance and returns its text ("" if stopped before anything was said).
+// Records one utterance and returns its text ("" if stopped before anything was said). `timing`
+// (optional) is sent along with the recording, for the server log: how long the last turn's steps took.
 // onStage(text) reports progress ("listening", "hearing you", "transcribing…"); onLevel(0-1) the
 // live sound level, for the animation. stop() ends the take now (sends what was said); abort()
 // drops it.
-export function listenOnce({ onStage, onLevel } = {}) {
+export function listenOnce({ onStage, onLevel, timing } = {}) {
   let stopRequested = false;
   let aborted = false;
   const done = (async () => {
@@ -149,7 +150,7 @@ export function listenOnce({ onStage, onLevel } = {}) {
         if (outcome !== "send") return "";
         onStage?.("transcribing…");
         const seconds = (performance.now() - began) / 1000;
-        return await transcribeClip(new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), seconds);
+        return await transcribeClip(new Blob(chunks, { type: recorder.mimeType || type || "audio/webm" }), seconds, timing);
       }
       return "";
     } finally {
@@ -165,12 +166,13 @@ export function listenOnce({ onStage, onLevel } = {}) {
 }
 
 // `seconds`: the recording's length, which the server checks against Whisper's audio-seconds limits
-async function transcribeClip(blob, seconds) {
+async function transcribeClip(blob, seconds, timing) {
   const extension = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
   const form = new FormData();
   form.append("audio", blob, `speech.${extension}`);
   form.append("language", navigator.language || "en");
   form.append("seconds", seconds.toFixed(1));
+  if (timing) form.append("timing", timing);
   const res = await fetch("/Assistant/api/transcribe", { method: "POST", body: form });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail || `Transcription failed (${res.status})`);
