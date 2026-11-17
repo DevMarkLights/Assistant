@@ -213,7 +213,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
   const [theme, toggleTheme] = useTheme();
   // Which title is being edited: { id, place: "sidebar" | "topbar" }
   const [renaming, setRenaming] = useState(null);
-  const bottomRef = useRef(null);
+  const messagesRef = useRef(null);
 
   // Wraps fetch so an expired session sends the user back to the login screen
   async function api(url, options) {
@@ -243,8 +243,11 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Scrolls only the message list. scrollIntoView also scrolls every container around it (the
+  // overflow-hidden .app too), which on iOS left the chat unscrollable after voice mode closed.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const box = messagesRef.current;
+    box?.scrollTo({ top: box.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
   // Escape closes the drawer on phones
@@ -425,6 +428,17 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
     setVoiceOpen(true);
   }
 
+  function closeVoice() {
+    setVoiceOpen(false);
+    // Undo any scrolling of the containers around the chat, and jump to the newest message
+    document.scrollingElement?.scrollTo(0, 0);
+    document.querySelector(".app")?.scrollTo(0, 0);
+    requestAnimationFrame(() => {
+      const box = messagesRef.current;
+      box?.scrollTo({ top: box.scrollHeight });
+    });
+  }
+
   const activeConversation = conversations.find((c) => c.id === activeId);
   const heading =
     view === "memory" ? "Memory" : view === "settings" ? "Settings" : view === "usage" ? "AI usage"
@@ -569,7 +583,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           <Usage api={api} />
         ) : (
           <>
-            <div className="messages">
+            <div className="messages" ref={messagesRef}>
               {messages.length === 0 && <p className="empty">Start a conversation</p>}
               {messages.map((m, i) => (
                 <div key={i} className={`bubble ${m.role}`}>
@@ -593,7 +607,6 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
                   )}
                 </div>
               ))}
-              <div ref={bottomRef} />
             </div>
 
             {error && <p className="error">{error}</p>}
@@ -620,7 +633,7 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
           </>
         )}
       </main>
-      {voiceOpen && <VoiceMode sendMessage={stableSend} onClose={() => setVoiceOpen(false)} />}
+      {voiceOpen && <VoiceMode sendMessage={stableSend} onClose={closeVoice} />}
     </div>
   );
 }

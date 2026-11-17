@@ -159,7 +159,14 @@ export default function VoiceMode({ sendMessage, onClose }) {
   useEffect(() => {
     if (spokenWord < 0) return;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    replyRef.current?.querySelector(".current")?.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+    // Scroll the reply box itself; scrollIntoView would also scroll the chat underneath the overlay
+    const box = replyRef.current;
+    const word = box?.querySelector(".current");
+    if (!word) return;
+    const outer = box.getBoundingClientRect();
+    const inner = word.getBoundingClientRect();
+    const by = inner.top < outer.top ? inner.top - outer.top : inner.bottom > outer.bottom ? inner.bottom - outer.bottom : 0;
+    if (by) box.scrollBy({ top: by, behavior: reduced ? "auto" : "smooth" });
   }, [spokenWord]);
 
   useEffect(() => {
