@@ -29,14 +29,22 @@ const IDLE_MS = 15000;
 const MAX_TAKE_MS = 60000;
 const MIN_LEVEL = 0.012; // quietest sound (RMS) that counts as speech; raised above background noise
 
+// The AudioContext that measures the voice level for pause detection. Each voice session gets a
+// fresh one, closed with the mic: on iOS a context kept from an earlier session (whose mic had been
+// released) heard only silence in the next session ("listening" but deaf), and an open one kept
+// the audio session active after voice mode closed.
 let audioContext = null;
+
+function newAudioContext() {
+  const Context = window.AudioContext || window.webkitAudioContext;
+  audioContext?.close().catch(() => {});
+  audioContext = Context ? new Context() : null;
+  audioContext?.resume().catch(() => {});
+}
 
 // iOS only lets an AudioContext run after a tap: call this from the tap that opens voice mode
 export function unlockMic() {
-  const Context = window.AudioContext || window.webkitAudioContext;
-  if (!Context) return;
-  audioContext ??= new Context();
-  audioContext.resume().catch(() => {});
+  newAudioContext();
 }
 
 function recordingType() {
@@ -48,14 +56,24 @@ function recordingType() {
 export class MicError extends Error {}
 
 let sessionStream = null;
+let micSession = 0; // bumped by closeMicSession(), so a mic that arrives after closing is released
 
+// Returns the session's mic stream, or null if voice mode closed while the mic was being opened
 async function openMicSession() {
   const live = sessionStream?.getAudioTracks().some((track) => track.readyState === "live");
   if (!live) {
+    const session = micSession;
     try {
-      sessionStream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      if (session !== micSession) {
+        // Closed while iOS was opening the mic: release it, or it stays recording after voice
+        // mode is gone (and the chat underneath stopped scrolling on iOS)
+        stream.getTracks().forEach((track) => track.stop());
+        return null;
+      }
+      sessionStream = stream;
     } catch (e) {
       sessionStream = null;
       throw new MicError(e?.name === "NotAllowedError"
@@ -72,8 +90,11 @@ function muteMic(muted) {
 
 // Releases the microphone (call when voice mode closes)
 export function closeMicSession() {
+  micSession++;
   sessionStream?.getTracks().forEach((track) => track.stop());
   sessionStream = null;
+  audioContext?.close().catch(() => {});
+  audioContext = null;
 }
 
 // Records one utterance and returns its text ("" if stopped before anything was said). `timing`
@@ -86,10 +107,12 @@ export function listenOnce({ onStage, onLevel, timing } = {}) {
   let aborted = false;
   const done = (async () => {
     const stream = await openMicSession();
+    if (!stream || aborted) return ""; // voice mode closed while the mic was opening
     muteMic(false);
     let source = null;
     try {
-      unlockMic();
+      if (!audioContext || audioContext.state === "closed") newAudioContext();
+      else audioContext.resume().catch(() => {});
       source = audioContext?.createMediaStreamSource(stream);
       const analyser = audioContext?.createAnalyser();
       if (analyser) {
