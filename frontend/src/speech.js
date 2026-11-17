@@ -165,6 +165,11 @@ export function listenOnce({ onStage, onLevel, timing } = {}) {
   };
 }
 
+// Where the last transcription's time went, for VoiceMode's timing line: the server returns its
+// wall-clock receive and respond times, compared with this device's clock (both internet-synced)
+let uploadTiming = "";
+export const lastUploadTiming = () => uploadTiming;
+
 // `seconds`: the recording's length, which the server checks against Whisper's audio-seconds limits
 async function transcribeClip(blob, seconds, timing) {
   const extension = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg" : "webm";
@@ -173,9 +178,18 @@ async function transcribeClip(blob, seconds, timing) {
   form.append("language", navigator.language || "en");
   form.append("seconds", seconds.toFixed(1));
   if (timing) form.append("timing", timing);
+  uploadTiming = "";
+  const sent = Date.now();
   const res = await fetch("/Assistant/api/transcribe", { method: "POST", body: form });
+  const headers = Date.now();
   const body = await res.json().catch(() => ({}));
+  const done = Date.now();
   if (!res.ok) throw new Error(body.detail || `Transcription failed (${res.status})`);
+  if (body.received_at && body.responded_at) {
+    const s = (ms) => `${(ms / 1000).toFixed(1)}s`;
+    uploadTiming = `upload ${s(body.received_at - sent)}, server ${s(body.responded_at - body.received_at)}, `
+      + `response ${s(headers - body.responded_at)}, body ${s(done - headers)}, ${Math.round(blob.size / 1024)} KB`;
+  }
   return (body.text || "").trim();
 }
 

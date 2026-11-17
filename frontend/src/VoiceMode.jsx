@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { MicError, audioSettled, closeMicSession, listenOnce, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
+import { MicError, audioSettled, closeMicSession, lastUploadTiming, listenOnce, savedLook, speak, speakable, splitWords, stopSpeaking } from "./speech";
 import VoiceVisual from "./VoiceVisual";
 
 const PHASE_LABEL = {
@@ -73,6 +73,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
       if (closed.current) return;
       if (!text) continue;
       marks.transcribed = performance.now();
+      marks.upload = lastUploadTiming();
       setError(null);
 
       setHeard(text);
@@ -116,7 +117,7 @@ export default function VoiceMode({ sendMessage, onClose }) {
       });
       // Sent with the next recording, so the server log shows where this turn's time went
       const since = (from, to) => (marks[from] != null && marks[to] != null ? `${((marks[to] - marks[from]) / 1000).toFixed(1)}s` : "-");
-      lastTiming.current = `transcription ${since("stopped", "transcribed")}, first words ${since("transcribed", "firstText")}, `
+      lastTiming.current = `transcription ${since("stopped", "transcribed")} (${marks.upload || "no breakdown"}), first words ${since("transcribed", "firstText")}, `
         + `reply done ${since("transcribed", "replyDone")}, until speaking ${since("replyDone", "speak")}, `
         + `until sound ${since("speak", "sound")} (${speakable(answer).length} chars)`;
     }

@@ -19,8 +19,10 @@ MAX_BYTES = 10 * 1024 * 1024  # ~10 minutes of compressed speech; Groq's free ti
 @router.post("")
 async def transcribe(audio: UploadFile, language: str | None = Form(None), seconds: float = Form(0.0),
                      timing: str | None = Form(None), user: dict = Depends(current_user)):
+    # FastAPI has read the whole multipart body before this runs, so this is when the upload finished
+    received_at = time.time()
     if timing:  # the browser's own measurements of the previous voice turn
-        log.info("voice timing (previous turn) for %s: %s", user["username"], timing[:300])
+        log.info("voice timing (previous turn) for %s: %s", user["username"], timing[:400])
     if llm_router.limiter is None:
         raise HTTPException(status_code=503, detail="Voice input needs the cloud models (LOCAL=false).")
     data = await audio.read(MAX_BYTES + 1)
@@ -38,4 +40,6 @@ async def transcribe(audio: UploadFile, language: str | None = Form(None), secon
         raise HTTPException(status_code=503, detail=e.user_message())
     log.info("transcribed %d KB for %s in %.1fs: %r", len(data) // 1024, user["username"],
              time.perf_counter() - started, text[:80])
-    return {"text": text}
+    # Wall-clock times (ms) so the browser can tell upload time from response time (both clocks are
+    # internet-synced, so they agree to within a fraction of a second)
+    return {"text": text, "received_at": round(received_at * 1000), "responded_at": round(time.time() * 1000)}
