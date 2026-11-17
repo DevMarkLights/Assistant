@@ -359,7 +359,7 @@ function wordAt(words, progress) {
 // as long as the previous one (Piper on the Pi generates about 4x faster than real time). Without
 // this, a short first sentence ("Sure, here's one.", 0.9 s of audio) followed by a 160-character
 // piece (2.2 s to generate) left a gap of over a second after the first sentence.
-export function chunkText(text, max = 220, firstMax = 120, growth = 2.5, minPiece = 50) {
+export function chunkText(text, max = 220, firstMax = 60, growth = 2.5, minPiece = 50) {
   if (text.trim().length <= firstMax) return [text.trim()]; // short replies: one request
   const sentences = text.match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) || [text];
   const chunks = [];
