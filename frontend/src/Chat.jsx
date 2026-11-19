@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
@@ -203,6 +203,15 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
   const [activeId, setActiveId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const inputRef = useRef(null);
+
+  // The composer grows with its text (up to the CSS max-height, then it scrolls)
+  useLayoutEffect(() => {
+    const box = inputRef.current;
+    if (!box) return;
+    box.style.height = "auto";
+    box.style.height = `${box.scrollHeight + box.offsetHeight - box.clientHeight}px`; // + borders
+  }, [input]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   // What the main pane shows: the chat, the Memory list, or Settings
@@ -612,9 +621,18 @@ export default function Chat({ user, onLogout, onUnauthorized }) {
             {error && <p className="error">{error}</p>}
 
             <form className="composer" onSubmit={send}>
-              <input
+              <textarea
+                ref={inputRef}
+                rows={1}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter sends; Shift+Enter adds a line (not while an IME is composing)
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    e.currentTarget.form.requestSubmit();
+                  }
+                }}
                 placeholder="Message your assistant..."
                 disabled={busy}
                 autoFocus={!mobile.matches}

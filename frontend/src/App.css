@@ -513,6 +513,7 @@ div.tool-call {
 
 .composer {
   display: flex;
+  align-items: flex-end; /* buttons stay at the bottom as the text box grows */
   gap: 8px;
   padding: 12px 24px;
   padding-bottom: max(12px, env(safe-area-inset-bottom));
@@ -520,18 +521,22 @@ div.tool-call {
   background: var(--bg);
 }
 
-.composer input {
+.composer textarea {
   flex: 1;
   min-width: 0;
   min-height: 46px;
-  padding: 0 16px;
+  max-height: 160px; /* about 6 lines, then it scrolls */
+  padding: 11px 16px; /* with a 22px line and the border: 46px for one line */
   border: 1px solid var(--border);
   border-radius: 23px;
   background: var(--surface);
   font-size: 16px; /* 16px+ stops iOS zooming in on focus */
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
 }
 
-.composer input:focus,
+.composer textarea:focus,
 .login-card input:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
